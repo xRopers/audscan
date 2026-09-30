@@ -1,20 +1,24 @@
 //! Writing the audio a manifest lists to files, exactly as it is in the input.
 
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
 use crate::error::{Error, Result, io_err};
-use crate::format::Track;
+use crate::format::Container;
+use crate::formats::fsb5::split_track;
 use crate::manifest::{AudioEntry, Manifest};
 
 #[derive(Debug, Clone)]
 pub struct ExtractOptions {
     /// Refuse to extract if the input's size or CRC differs from the manifest's.
     pub verify_source: bool,
-    /// Also write each file inside a Wwise bank or package (WEMs, and a package's
-    /// SoundBanks) to a folder named after the bank: see [`Track::split_filename`].
+    /// Also write each track of a bank or package to a folder named after it: Wwise WEMs
+    /// and SoundBanks as they are, FSB5 tracks as WAV (PCM) or one-track FSB5 files. See
+    /// [`Track::split_filename`] and [`crate::formats::fsb5::split_track`].
     pub split: bool,
 }
 
@@ -56,7 +60,7 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
     if let Some(bad) = manifest.audio.iter().find(|a| !is_safe_filename(&a.file)) {
         return Err(Error::BadFilename(bad.file.clone()));
     }
-    let splits: Vec<Vec<(String, &Track)>> = manifest
+    let splits: Vec<Vec<(String, usize)>> = manifest
         .audio
         .iter()
         .map(|a| if opts.split { split_files(a) } else { Ok(Vec::new()) })
@@ -73,12 +77,19 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
             fs::write(&path, bytes).map_err(io_err(&path))?;
             let folder = out_dir.join(entry.file.rsplit_once('.').map_or(entry.file.as_str(), |(stem, _)| stem));
             let mut split = Vec::with_capacity(splits.len());
-            for (name, track) in splits {
+            for (name, index) in splits {
+                let track = &entry.tracks[index];
+                let file = match entry.format {
+                    Container::Fsb5 => Cow::Owned(
+                        split_track(bytes, index).map_err(|reason| Error::Audio { id: entry.id, offset: entry.offset, reason })?,
+                    ),
+                    _ => Cow::Borrowed(&bytes[track.offset as usize..(track.offset + track.size) as usize]),
+                };
                 let path = folder.join(&name);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(io_err(parent))?;
                 }
-                fs::write(&path, &bytes[track.offset as usize..(track.offset + track.size) as usize]).map_err(io_err(&path))?;
+                fs::write(&path, &file).map_err(io_err(&path))?;
                 split.push(path);
             }
             Ok(ExtractedFile { id: entry.id, offset: entry.offset, path, size: bytes.len() as u64, split })
@@ -86,13 +97,21 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
         .collect()
 }
 
-/// The files `split` writes for one entry: every track that is a file of its own, by its
-/// relative path, checked to stay inside the bank's folder and to lie inside the bank.
-fn split_files(entry: &AudioEntry) -> Result<Vec<(String, &Track)>> {
+/// The files `split` writes for one entry, by relative path and track index: every track
+/// that can be split out, checked to stay inside the bank's folder and to lie inside the
+/// bank. Tracks that would get the same name (ignoring case, as Windows does) get their
+/// index added.
+fn split_files(entry: &AudioEntry) -> Result<Vec<(String, usize)>> {
     let fail = |reason: String| Error::Audio { id: entry.id, offset: entry.offset, reason };
     let mut files = Vec::new();
-    for track in &entry.tracks {
-        let Some(name) = track.split_filename() else { continue };
+    let mut used = HashSet::new();
+    for (index, track) in entry.tracks.iter().enumerate() {
+        let Some(mut name) = track.split_filename(index) else { continue };
+        if !used.insert(name.to_lowercase()) {
+            let (stem, ext) = name.rsplit_once('.').unwrap_or((&name, ""));
+            name = format!("{stem}_{index}.{ext}");
+            used.insert(name.to_lowercase());
+        }
         let plain_extension = track.extension.as_deref().is_some_and(|e| e.bytes().all(|b| b.is_ascii_alphanumeric()));
         if !plain_extension || !name.split('/').all(is_safe_filename) {
             return Err(Error::BadFilename(name));
@@ -100,7 +119,7 @@ fn split_files(entry: &AudioEntry) -> Result<Vec<(String, &Track)>> {
         if track.offset.checked_add(track.size).is_none_or(|end| end > entry.size) {
             return Err(fail(format!("{name} lies outside it")));
         }
-        files.push((name, track));
+        files.push((name, index));
     }
     Ok(files)
 }

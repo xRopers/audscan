@@ -56,7 +56,7 @@ pub struct ExpectedTrack {
     pub language: Option<&'static str>,
     /// Per track for Wwise; `None` for FSB5.
     pub codec: Option<&'static str>,
-    /// `wem` or `bnk` for Wwise; `None` for FSB5.
+    /// What it's split out as: `wem` or `bnk` for Wwise, `wav` or `fsb` for FSB5.
     pub extension: Option<&'static str>,
     pub channels: u16,
     pub sample_rate: u32,
@@ -69,9 +69,11 @@ pub struct ExpectedTrack {
 }
 
 impl ExpectedTrack {
-    pub fn fsb(name: Option<&str>, channels: u16, sample_rate: u32, samples: u64) -> Self {
+    /// An FSB5 track, split out as `extension` (`wav` for PCM banks, else `fsb`).
+    pub fn fsb(extension: &'static str, name: Option<&str>, channels: u16, sample_rate: u32, samples: u64) -> Self {
         let name = name.unwrap_or("").to_string();
-        Self { name, language: None, codec: None, extension: None, channels, sample_rate, samples: Some(samples), noted: false, range: None }
+        let extension = Some(extension);
+        Self { name, language: None, codec: None, extension, channels, sample_rate, samples: Some(samples), noted: false, range: None }
     }
 }
 
@@ -575,7 +577,7 @@ pub fn audio_archive() -> Fixture {
     assert_eq!(&bank[at..at + 4], b"FSB5");
     b.raw(&bank[..at]);
     let mut m = Meta::new("fsb5", "fsb5", "Vorbis", 2, 44100, None);
-    m.tracks = tracks.iter().map(|t| ExpectedTrack::fsb(t.name, t.channels, t.rate, t.samples)).collect();
+    m.tracks = tracks.iter().map(|t| ExpectedTrack::fsb("fsb", t.name, t.channels, t.rate, t.samples)).collect();
     b.audio(&fsb, m);
     b.raw(&bank[at + fsb.len()..]);
     b.gap();
@@ -583,7 +585,20 @@ pub fn audio_archive() -> Fixture {
     // Version 0 FSB5 (0x40-byte header), one unnamed PCM track.
     let fsb = fsb5(0, 2, &[FsbTrack { name: None, channels: 1, rate: 22050, samples: 500, data_len: 1000 }], &mut b.rng);
     let mut m = Meta::new("fsb5", "fsb5", "PCM 16-bit", 1, 22050, Some(500));
-    m.tracks = vec![ExpectedTrack::fsb(None, 1, 22050, 500)];
+    m.tracks = vec![ExpectedTrack::fsb("wav", None, 1, 22050, 500)];
+    b.audio(&fsb, m);
+    b.gap();
+
+    // An 8-bit PCM bank: two tracks with the same name (and a character a file name can't
+    // hold), then an unnamed one. Split, they're told apart.
+    let tracks = [
+        FsbTrack { name: Some("ui/click"), channels: 1, rate: 22050, samples: 100, data_len: 100 },
+        FsbTrack { name: Some("ui/click"), channels: 2, rate: 22050, samples: 30, data_len: 60 },
+        FsbTrack { name: None, channels: 1, rate: 8000, samples: 40, data_len: 40 },
+    ];
+    let fsb = fsb5(1, 1, &tracks, &mut b.rng);
+    let mut m = Meta::new("fsb5", "fsb5", "PCM 8-bit", 1, 22050, None);
+    m.tracks = tracks.iter().map(|t| ExpectedTrack::fsb("wav", t.name, t.channels, t.rate, t.samples)).collect();
     b.audio(&fsb, m);
     b.gap();
 

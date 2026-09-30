@@ -7,10 +7,17 @@
 //! Layout as documented by vgmstream's `fsb5.c`: a 0x3C-byte header (0x40 in version 0),
 //! then the track headers, the name table (one offset per track, then NUL-terminated
 //! names) and the sample data.
+//!
+//! A track can be split out ([`split_track`]): PCM as a WAV, anything else as a bank of
+//! one track, since the raw codec data (Vorbis without its setup headers, XMA, ADPCM...)
+//! can't be played without the header describing it.
+
+use std::ops::Range;
 
 use memchr::memchr;
 
 use crate::format::{AudioFormat, AudioInfo, Container, Reject, Track, u32_le, u64_le};
+use crate::formats::riff::Riff;
 
 pub struct Fsb5;
 
@@ -57,105 +64,223 @@ impl AudioFormat for Fsb5 {
     }
 
     fn parse(&self, data: &[u8]) -> Result<AudioInfo, Reject> {
-        if data.len() < 8 {
-            return Err(Reject::NoMatch);
-        }
-        let version = u32_le(data, 4);
-        if version > 1 {
-            return Err(Reject::NoMatch);
-        }
-        let header = if version == 0 { 0x40 } else { 0x3C };
-        if data.len() < header {
-            return Err(Reject::Bad("the header is cut off by the end of the file".into()));
-        }
-        let count = u32_le(data, 8);
-        let (headers, names, sample_data) = (u32_le(data, 0xC) as usize, u32_le(data, 0x10) as usize, u32_le(data, 0x14));
-        let mode = u32_le(data, 0x18);
-        let codec = codec_name(mode).ok_or_else(|| Reject::Bad(format!("unknown codec {mode}")))?;
-        if count == 0 {
-            return Err(Reject::Bad("no tracks".into()));
-        }
-        if (headers as u64) < u64::from(count) * 8 {
-            return Err(Reject::Bad(format!("{headers} bytes of track headers can't hold {count} tracks")));
-        }
-        let size = (header + headers + names) as u64 + u64::from(sample_data);
-        if size > data.len() as u64 {
-            return Err(Reject::Bad(format!("runs past the end of the file ({size} bytes declared, {} left)", data.len())));
-        }
+        read(data).map(|(info, _)| info)
+    }
+}
 
-        let table_end = header + headers;
-        let data_start = (table_end + names) as u64;
-        let cut_off = |i: u32| Reject::Bad(format!("track {i}'s header is cut off"));
-        let mut tracks = Vec::with_capacity(count as usize);
-        let mut pos = header;
-        for i in 0..count {
-            if pos + 8 > table_end {
+/// What splitting a track needs besides its [`Track`]: where things are in the bank.
+struct Layout {
+    /// Bytes of the fixed header (0x3C, or 0x40 in version 0).
+    header: usize,
+    /// The codec number.
+    mode: u32,
+    /// Each track's header bytes: the packed u64 and its extra chunks.
+    entries: Vec<Range<usize>>,
+}
+
+/// Codec numbers of the PCM formats (8-, 16-, 24-, 32-bit and float), split out as WAV.
+const PCM: std::ops::RangeInclusive<u32> = 1..=5;
+
+fn read(data: &[u8]) -> Result<(AudioInfo, Layout), Reject> {
+    if data.len() < 8 {
+        return Err(Reject::NoMatch);
+    }
+    let version = u32_le(data, 4);
+    if version > 1 {
+        return Err(Reject::NoMatch);
+    }
+    let header = if version == 0 { 0x40 } else { 0x3C };
+    if data.len() < header {
+        return Err(Reject::Bad("the header is cut off by the end of the file".into()));
+    }
+    let count = u32_le(data, 8);
+    let (headers, names, sample_data) = (u32_le(data, 0xC) as usize, u32_le(data, 0x10) as usize, u32_le(data, 0x14));
+    let mode = u32_le(data, 0x18);
+    let codec = codec_name(mode).ok_or_else(|| Reject::Bad(format!("unknown codec {mode}")))?;
+    if count == 0 {
+        return Err(Reject::Bad("no tracks".into()));
+    }
+    if (headers as u64) < u64::from(count) * 8 {
+        return Err(Reject::Bad(format!("{headers} bytes of track headers can't hold {count} tracks")));
+    }
+    let size = (header + headers + names) as u64 + u64::from(sample_data);
+    if size > data.len() as u64 {
+        return Err(Reject::Bad(format!("runs past the end of the file ({size} bytes declared, {} left)", data.len())));
+    }
+
+    let table_end = header + headers;
+    let data_start = (table_end + names) as u64;
+    let cut_off = |i: u32| Reject::Bad(format!("track {i}'s header is cut off"));
+    let mut tracks = Vec::with_capacity(count as usize);
+    let mut entries = Vec::with_capacity(count as usize);
+    let extension = if PCM.contains(&mode) { "wav" } else { "fsb" };
+    let mut pos = header;
+    for i in 0..count {
+        if pos + 8 > table_end {
+            return Err(cut_off(i));
+        }
+        let entry_start = pos;
+        let packed = u64_le(data, pos);
+        pos += 8;
+        let mut channels = CHANNELS[(packed >> 5 & 3) as usize];
+        let mut sample_rate = RATES.get((packed >> 1 & 0xF) as usize).copied().unwrap_or(44100);
+        let offset = (packed >> 7 & 0x07FF_FFFF) << 5;
+        let samples = packed >> 34;
+        let mut more = packed & 1 != 0;
+        while more {
+            if pos + 4 > table_end {
                 return Err(cut_off(i));
             }
-            let packed = u64_le(data, pos);
-            pos += 8;
-            let mut channels = CHANNELS[(packed >> 5 & 3) as usize];
-            let mut sample_rate = RATES.get((packed >> 1 & 0xF) as usize).copied().unwrap_or(44100);
-            let offset = (packed >> 7 & 0x07FF_FFFF) << 5;
-            let samples = packed >> 34;
-            let mut more = packed & 1 != 0;
-            while more {
-                if pos + 4 > table_end {
-                    return Err(cut_off(i));
-                }
-                let chunk = u32_le(data, pos);
-                let (len, kind) = ((chunk >> 1 & 0xFF_FFFF) as usize, chunk >> 25);
-                more = chunk & 1 != 0;
-                let body = pos + 4;
-                if body + len > table_end {
-                    return Err(cut_off(i));
-                }
-                match kind {
-                    CHUNK_CHANNELS if len >= 1 => channels = u16::from(data[body]),
-                    CHUNK_RATE if len >= 4 => sample_rate = u32_le(data, body),
-                    _ => {}
-                }
-                pos = body + len;
+            let chunk = u32_le(data, pos);
+            let (len, kind) = ((chunk >> 1 & 0xFF_FFFF) as usize, chunk >> 25);
+            more = chunk & 1 != 0;
+            let body = pos + 4;
+            if body + len > table_end {
+                return Err(cut_off(i));
             }
-            if offset > u64::from(sample_data) {
-                return Err(Reject::Bad(format!("track {i}'s data starts past the end of the sample data")));
+            match kind {
+                CHUNK_CHANNELS if len >= 1 => channels = u16::from(data[body]),
+                CHUNK_RATE if len >= 4 => sample_rate = u32_le(data, body),
+                _ => {}
             }
-            tracks.push(Track { channels, sample_rate, samples: Some(samples), offset: data_start + offset, ..Track::default() });
+            pos = body + len;
         }
-
-        // Each track runs to the next one's data (or the end of the sample data).
-        let mut starts: Vec<u64> = tracks.iter().map(|t| t.offset).collect();
-        starts.sort_unstable();
-        starts.push(size);
-        for t in &mut tracks {
-            let next = starts[starts.partition_point(|&s| s <= t.offset)];
-            t.size = next - t.offset;
+        if offset > u64::from(sample_data) {
+            return Err(Reject::Bad(format!("track {i}'s data starts past the end of the sample data")));
         }
-
-        if names >= 4 * count as usize {
-            let table = &data[table_end..table_end + names];
-            for (i, t) in tracks.iter_mut().enumerate() {
-                let at = u32_le(table, 4 * i) as usize;
-                if let Some(rest) = table.get(at..) {
-                    let name = &rest[..memchr(0, rest).unwrap_or(rest.len())];
-                    t.name = std::str::from_utf8(name).ok().filter(|n| !n.is_empty()).map(String::from);
-                }
-            }
-        }
-
-        let first = &tracks[0];
-        Ok(AudioInfo {
-            size,
-            codec: codec.to_string(),
-            channels: first.channels,
-            sample_rate: first.sample_rate,
-            samples: if count == 1 { first.samples } else { None },
-            big_endian: false,
-            wwise: false,
-            tracks,
-            note: None,
-        })
+        entries.push(entry_start..pos);
+        tracks.push(Track {
+            extension: Some(extension.into()),
+            channels,
+            sample_rate,
+            samples: Some(samples),
+            offset: data_start + offset,
+            ..Track::default()
+        });
     }
+
+    // Each track runs to the next one's data (or the end of the sample data).
+    let mut starts: Vec<u64> = tracks.iter().map(|t| t.offset).collect();
+    starts.sort_unstable();
+    starts.push(size);
+    for t in &mut tracks {
+        let next = starts[starts.partition_point(|&s| s <= t.offset)];
+        t.size = next - t.offset;
+    }
+
+    if names >= 4 * count as usize {
+        let table = &data[table_end..table_end + names];
+        for (i, t) in tracks.iter_mut().enumerate() {
+            let at = u32_le(table, 4 * i) as usize;
+            if let Some(rest) = table.get(at..) {
+                let name = &rest[..memchr(0, rest).unwrap_or(rest.len())];
+                t.name = std::str::from_utf8(name).ok().filter(|n| !n.is_empty()).map(String::from);
+            }
+        }
+    }
+
+    let first = &tracks[0];
+    let info = AudioInfo {
+        size,
+        codec: codec.to_string(),
+        channels: first.channels,
+        sample_rate: first.sample_rate,
+        samples: if count == 1 { first.samples } else { None },
+        big_endian: false,
+        wwise: false,
+        tracks,
+        note: None,
+    };
+    Ok((info, Layout { header, mode, entries }))
+}
+
+/// Track `index` of a bank as a file of its own: PCM as a WAV, anything else as a bank of
+/// one track (the bank's header, the track's header with its data offset zeroed, its name
+/// and its data, all copied). The file is read back and must describe the same sound.
+pub fn split_track(bank: &[u8], index: usize) -> Result<Vec<u8>, String> {
+    let (info, layout) = read(bank).map_err(|_| "the bank no longer reads as FSB5".to_string())?;
+    let track = info.tracks.get(index).ok_or_else(|| format!("the bank has no track {index}"))?;
+    let data = &bank[track.offset as usize..(track.offset + track.size) as usize];
+    let (file, back, samples) = if PCM.contains(&layout.mode) {
+        let (file, frames) = pcm_wav(layout.mode, track, data);
+        let back = Riff.parse(&file);
+        (file, back, Some(frames))
+    } else {
+        let file = one_track_bank(bank, &layout, index, track, data);
+        let back = Fsb5.parse(&file);
+        (file, back, track.samples)
+    };
+    let back = back.map_err(|e| format!("track {index} doesn't read back once split: {e:?}"))?;
+    let name = back.tracks.first().and_then(|t| t.name.clone());
+    let same = back.size == file.len() as u64
+        && (back.channels, back.sample_rate, back.samples) == (track.channels, track.sample_rate, samples)
+        && (PCM.contains(&layout.mode) || name == track.name);
+    if !same {
+        return Err(format!("track {index} reads back differently once split"));
+    }
+    Ok(file)
+}
+
+/// A WAV of a PCM track, and how many frames it holds: as many as the track says, or as
+/// fit in its data. FMOD's 8-bit PCM is signed and WAV's unsigned; the rest is copied.
+fn pcm_wav(mode: u32, track: &Track, data: &[u8]) -> (Vec<u8>, u64) {
+    let bytes_per_sample: u16 = match mode {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        _ => 4,
+    };
+    let frame = usize::from(bytes_per_sample * track.channels.max(1));
+    let frames = (track.samples.unwrap_or(0) as usize).min(data.len() / frame);
+    let mut pcm = data[..frames * frame].to_vec();
+    if mode == 1 {
+        pcm.iter_mut().for_each(|b| *b ^= 0x80);
+    }
+    let tag: u16 = if mode == 5 { 3 } else { 1 };
+    let mut fmt = Vec::with_capacity(16);
+    fmt.extend_from_slice(&tag.to_le_bytes());
+    fmt.extend_from_slice(&track.channels.to_le_bytes());
+    fmt.extend_from_slice(&track.sample_rate.to_le_bytes());
+    fmt.extend_from_slice(&(track.sample_rate * frame as u32).to_le_bytes());
+    fmt.extend_from_slice(&(frame as u16).to_le_bytes());
+    fmt.extend_from_slice(&(bytes_per_sample * 8).to_le_bytes());
+
+    let mut out = b"RIFF".to_vec();
+    let body = 4 + 8 + fmt.len() + 8 + pcm.len() + pcm.len() % 2;
+    out.extend_from_slice(&(body as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    out.extend(fmt);
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    out.extend_from_slice(&pcm);
+    if pcm.len() % 2 == 1 {
+        out.push(0);
+    }
+    (out, frames as u64)
+}
+
+fn one_track_bank(bank: &[u8], layout: &Layout, index: usize, track: &Track, data: &[u8]) -> Vec<u8> {
+    let entry = &bank[layout.entries[index].clone()];
+    // The track's data now starts the sample data: offset 0.
+    let packed = u64_le(entry, 0) & !(0x07FF_FFFF << 7);
+    let mut headers = packed.to_le_bytes().to_vec();
+    headers.extend_from_slice(&entry[8..]);
+    let mut names = Vec::new();
+    if let Some(name) = &track.name {
+        names.extend_from_slice(&4u32.to_le_bytes());
+        names.extend_from_slice(name.as_bytes());
+        names.push(0);
+        names.resize(names.len().next_multiple_of(4), 0);
+    }
+    let mut out = bank[..layout.header].to_vec();
+    for (at, value) in [(0x8, 1), (0xC, headers.len()), (0x10, names.len()), (0x14, data.len())] {
+        out[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+    }
+    out.extend(headers);
+    out.extend(names);
+    out.extend_from_slice(data);
+    out
 }
 
 #[cfg(test)]

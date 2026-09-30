@@ -78,8 +78,8 @@ pub struct Track {
     /// When tracks can differ (Wwise); an FSB5 bank has one codec for all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
-    /// When the track is a whole file of its own (a Wwise `wem` or `bnk`), its type, so it
-    /// can be extracted alone. FSB5 tracks are raw codec data, so this is `None`.
+    /// The type of file it's split out as: a Wwise `wem` or `bnk` is one already; an FSB5
+    /// track becomes a `wav` (PCM) or a one-track `fsb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
     /// 0 when unknown or not audio (a SoundBank in a package).
@@ -107,17 +107,34 @@ impl Track {
         }
     }
 
-    /// Where `extract --split` writes it, relative to the bank's folder: `{id}.{ext}`, in a
-    /// folder named after its language unless that's `sfx`. `None` if it can't be
-    /// extracted alone.
-    pub fn split_filename(&self) -> Option<String> {
-        let (id, ext) = (self.id?, self.extension.as_deref()?);
-        let file = format!("{id}.{ext}");
+    /// Where `extract --split` writes it (track `index` of its bank), relative to the bank's
+    /// folder: `{id}.{ext}` for Wwise, in a folder named after its language unless that's
+    /// `sfx`; `{name}.{ext}` for FSB5, with characters a file name can't hold replaced by
+    /// `_`, or `track{index}.{ext}` if it has no name. `None` if it can't be split out.
+    /// Two tracks can get the same name; extract tells them apart.
+    pub fn split_filename(&self, index: usize) -> Option<String> {
+        let ext = self.extension.as_deref()?;
+        let stem = match (self.id, self.name.as_deref().map(file_stem)) {
+            (Some(id), _) => id.to_string(),
+            (None, Some(name)) if !name.is_empty() => name,
+            _ => format!("track{index}"),
+        };
+        let file = format!("{stem}.{ext}");
         match self.language.as_deref() {
             Some(lang) if lang != "sfx" && crate::extract::is_safe_filename(lang) => Some(format!("{lang}/{file}")),
             _ => Some(file),
         }
     }
+}
+
+/// A name made safe as a file name on any system: letters, digits, spaces and `_-.()[]`
+/// kept, anything else `_`, no leading or trailing dots or spaces (Windows drops those).
+fn file_stem(name: &str) -> String {
+    let kept: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || " _-.()[]".contains(c) { c } else { '_' })
+        .collect();
+    kept.trim_matches(['.', ' ']).to_string()
 }
 
 /// What a header says about the audio, and so how big it is.
@@ -242,5 +259,16 @@ mod tests {
         assert_eq!(label(Container::Riff, true, true), "wem BE");
         assert_eq!(label(Container::Fsb5, false, false), "fsb5");
         assert_eq!(extension(Container::Fsb5, false), "fsb");
+    }
+
+    #[test]
+    fn split_filenames() {
+        let fsb = |name: Option<&str>| Track { name: name.map(String::from), extension: Some("fsb".into()), ..Track::default() };
+        assert_eq!(fsb(Some("music/intro:loop")).split_filename(3).unwrap(), "music_intro_loop.fsb");
+        assert_eq!(fsb(Some("..")).split_filename(3).unwrap(), "track3.fsb");
+        assert_eq!(fsb(None).split_filename(0).unwrap(), "track0.fsb");
+        let wem = Track { id: Some(42), language: Some("french".into()), extension: Some("wem".into()), ..Track::default() };
+        assert_eq!(wem.split_filename(9).unwrap(), "french/42.wem");
+        assert_eq!(Track::default().split_filename(0), None);
     }
 }

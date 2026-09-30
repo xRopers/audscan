@@ -42,7 +42,7 @@ fn found_rows(data: &[u8]) -> Vec<Row> {
                 .tracks
                 .iter()
                 .map(|t| {
-                    let range = t.extension.is_some().then_some((t.offset, t.size));
+                    let range = t.id.is_some().then_some((t.offset, t.size));
                     let (lang, codec, ext) = (t.language.clone(), t.codec.clone(), t.extension.clone());
                     (t.display_name(), lang, codec, ext, t.channels, t.sample_rate, t.samples, t.note.is_some(), range)
                 })
@@ -175,12 +175,77 @@ fn split_writes_each_wwise_file_by_id_and_language() {
     let i = f.expected.iter().position(|e| e.codec == "mixed").unwrap();
     assert_eq!(files[i].split.len(), 3);
     assert_eq!(fs::read(&files[i].split[2]).unwrap().len(), 600);
-    // FSB5 tracks are raw codec data, not files: nothing is split out.
-    let i = f.expected.iter().position(|e| e.container == "fsb5").unwrap();
-    assert!(files[i].split.is_empty());
     // Without split, nothing is.
     let plain = extract_all(&f.data, &manifest, &dir.path().join("plain"), &ExtractOptions::default()).unwrap();
     assert!(plain.iter().all(|f| f.split.is_empty()));
+}
+
+/// The split files of the fixture's `n`th FSB5 bank, by name relative to its folder.
+fn split_fsb5(n: usize) -> (audscan_fixtures::Expected, Vec<(String, Vec<u8>)>) {
+    let f = audscan_fixtures::audio_archive();
+    let found = scan(&f.data, &ScanOptions::default()).audio;
+    let manifest = Manifest::new(SourceInfo::describe(Path::new(f.name), &f.data), ScanOptions::default(), &found);
+    let dir = tempfile::tempdir().unwrap();
+    let files = extract_all(&f.data, &manifest, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap();
+    let i = f.expected.iter().enumerate().filter(|(_, e)| e.container == "fsb5").nth(n).unwrap().0;
+    let folder = dir.path().join(format!("{:08x}", f.expected[i].offset));
+    let split = files[i]
+        .split
+        .iter()
+        .map(|p| (p.strip_prefix(&folder).unwrap().to_string_lossy().into_owned(), fs::read(p).unwrap()))
+        .collect();
+    (f.expected[i].clone(), split)
+}
+
+#[test]
+fn fsb5_tracks_split_into_one_track_banks() {
+    let (e, split) = split_fsb5(0);
+    let names: Vec<_> = split.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["music_intro.fsb", "vo_line_01.fsb", "amb_odd.fsb"]);
+    for ((_, bytes), t) in split.iter().zip(&e.tracks) {
+        // Each is a bank of one track, with that track's name, channels, rate and length.
+        let alone = scan(bytes, &ScanOptions::default()).audio;
+        assert_eq!(alone.len(), 1);
+        let a = &alone[0];
+        assert_eq!((a.container, a.info.size, a.info.codec.as_str()), (Container::Fsb5, bytes.len() as u64, "Vorbis"));
+        let only = &a.info.tracks[..];
+        assert_eq!(only.len(), 1);
+        assert_eq!((only[0].display_name(), only[0].channels, only[0].sample_rate, only[0].samples), (t.name.clone(), t.channels, t.sample_rate, t.samples));
+    }
+    // The track data is copied as it was: the same bytes at the end of each file.
+    let f = audscan_fixtures::audio_archive();
+    let bank = scan(&f.data, &ScanOptions::default()).audio.into_iter().find(|a| a.offset == e.offset as u64).unwrap();
+    for ((_, bytes), t) in split.iter().zip(&bank.info.tracks) {
+        let data = &f.data[(bank.offset + t.offset) as usize..][..t.size as usize];
+        assert!(bytes.ends_with(data));
+    }
+}
+
+#[test]
+fn pcm_fsb5_tracks_split_into_wavs() {
+    // Version 0, PCM16, unnamed: a WAV named by its index.
+    let (_, split) = split_fsb5(1);
+    assert_eq!(split.len(), 1);
+    let (name, wav) = &split[0];
+    assert_eq!(name, "track0.wav");
+    let a = &scan(wav, &ScanOptions::default()).audio[0];
+    assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.sample_rate, a.info.samples), ("PCM 16-bit", 1, 22050, Some(500)));
+
+    // PCM8: names made safe, duplicates told apart, 8-bit samples made unsigned.
+    let (e, split) = split_fsb5(2);
+    let names: Vec<_> = split.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["ui_click.wav", "ui_click_1.wav", "track2.wav"]);
+    let f = audscan_fixtures::audio_archive();
+    let bank = scan(&f.data, &ScanOptions::default()).audio.into_iter().find(|a| a.offset == e.offset as u64).unwrap();
+    for ((_, wav), t) in split.iter().zip(&bank.info.tracks) {
+        let a = &scan(wav, &ScanOptions::default()).audio[0];
+        assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.sample_rate, a.info.samples), ("PCM 8-bit", t.channels, t.sample_rate, t.samples));
+        let frames = (t.samples.unwrap() * u64::from(t.channels)) as usize;
+        let signed = &f.data[(bank.offset + t.offset) as usize..][..frames];
+        let unsigned: Vec<u8> = signed.iter().map(|b| b ^ 0x80).collect();
+        let data_at = wav.len() - frames - frames % 2;
+        assert_eq!(&wav[data_at..data_at + frames], &unsigned[..]);
+    }
 }
 
 #[test]

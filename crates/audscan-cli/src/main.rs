@@ -47,9 +47,9 @@ enum Command {
         /// Extract even if the input's size or CRC no longer matches the manifest
         #[arg(long)]
         force: bool,
-        /// Also split Wwise banks and packages: each WEM (and a package's SoundBanks) is
-        /// written as <ID>.wem / <ID>.bnk in a folder named after the bank, in a
-        /// subfolder per language for localized files
+        /// Also split banks and packages into a folder named after each: Wwise WEMs (and a
+        /// package's SoundBanks) as <ID>.wem / <ID>.bnk, localized ones in a subfolder
+        /// per language; FSB5 tracks as <name>.wav (PCM) or one-track <name>.fsb
         #[arg(long)]
         split: bool,
         /// Filters for the fresh scan (ignored with --manifest)
@@ -142,7 +142,7 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{} audio file(s) extracted to {}", files.len(), dir.display());
                 let split_out: usize = files.iter().map(|f| f.split.len()).sum();
                 if split {
-                    println!("{split_out} file(s) split out of Wwise banks and packages");
+                    println!("{split_out} file(s) split out of banks and packages");
                 }
             }
         }

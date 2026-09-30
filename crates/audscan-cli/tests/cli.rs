@@ -109,8 +109,8 @@ fn extract_split_writes_wwise_files_and_lists_them() {
     let out_dir = dir.path().join("out");
     let out = audscan().arg("extract").arg(&input).arg("-d").arg(&out_dir).arg("--split").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // 3 + 1 from the banks, 4 + 1 from the packages.
-    assert!(String::from_utf8_lossy(&out.stdout).contains("9 file(s) split out"), "{}", String::from_utf8_lossy(&out.stdout));
+    // 3 + 1 + 3 from the FSB5 banks, 3 + 1 from the Wwise banks, 4 + 1 from the packages.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("16 file(s) split out"), "{}", String::from_utf8_lossy(&out.stdout));
     let pck = f.expected.iter().find(|e| e.container == "pck").unwrap();
     assert!(out_dir.join(format!("{:08x}", pck.offset)).join("english(us)").join("100.wem").exists());
 
