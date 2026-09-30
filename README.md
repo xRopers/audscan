@@ -12,6 +12,10 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 **Status: early.** Scan, extract, splitting and WEM conversion work. More formats, putting edited sounds back, and a desktop app are next.
 
+## Download
+
+Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe`, the command line. Nothing to install: the C runtime is built in.
+
 ## Build
 
 Rust 1.89 or later:
