@@ -56,11 +56,17 @@ Every command takes `--json`. The input is never modified. `extract` refuses a f
 ### WAV and Wwise WEM (RIFF, RIFX)
 
 - `RIFF` and big-endian `RIFX` files of form `WAVE` (and `XWMA`). Other RIFF forms (AVI, WebP, FMOD Studio `.bank` files) are skipped, so an FSB5 bank inside a `.bank` is still found.
-- The codec is named from the `fmt ` chunk: PCM, IEEE float, A-law, mu-law, MS and IMA ADPCM, MP3, WMA, XMA/XMA2, ATRAC3/ATRAC9, `WAVE_FORMAT_EXTENSIBLE`, and Wwise's own (Vorbis, Opus, PTADPCM, IMA ADPCM).
-- Wwise audio is extracted as `.wem`: recognised by its codec, an `akd ` chunk, or being RIFX.
-- Lengths come from the data size (PCM), the `fact` chunk, or Wwise Vorbis's own sample count.
+- The codec is named from the `fmt ` chunk: PCM, IEEE float, A-law, mu-law, MS and IMA ADPCM, MP3, WMA, XMA/XMA2, ATRAC3/ATRAC9, `WAVE_FORMAT_EXTENSIBLE`, and Wwise's own (Vorbis, Opus, PTADPCM, IMA ADPCM, PCM).
+- Wwise audio is extracted as `.wem`: recognised by its codec, an `akd ` chunk, being RIFX, or Wwise's own short `fmt ` layout for ADPCM and PCM.
+- Lengths come from the data size (PCM, IMA ADPCM), the `fact` chunk, or the sample count Wwise stores for Vorbis, Opus and PTADPCM.
+- Common writer mistakes are tolerated, each with a note: a RIFF size that's 4 bytes short or counts a padding byte that isn't there, a last chunk a byte short, or a broken metadata chunk after the audio.
 
-Checked against Once Human's archives (a Wwise game): 81 GB scanned in 140 seconds, finding 17,748 loose WEMs and 1,215 SoundBanks holding 26,500 more (Wwise Vorbis and PTADPCM), every one sized exactly. All 1,772 `.wav` files on the development machine scan to exactly their length, including 27 whose RIFF header understates it by 4 bytes (a common writer bug; the `data` chunk shows the real end, and a note says so).
+Checked against real games:
+
+- **Once Human** (Wwise): 81 GB of archives scanned in 140 seconds, finding 17,748 loose WEMs and 1,215 SoundBanks holding 26,500 more, every one sized exactly.
+- **Aniimo** and **BioShock Infinite** (Wwise, 2013 to now): all 637 loose WEMs, 2,022 SoundBanks and both packages scan to exactly their length. The 113,000 sounds inside (Vorbis, Opus, PTADPCM, IMA ADPCM, PCM) all get a codec and a length, and the lengths agree with each file's byte rate. All 10,200 WEMs split out of BioShock's packages are exact, voice lines in an `english(us)` folder.
+- **Left 4 Dead 2**: all 26,725 WAVs scan to exactly their length. 7,175 of them needed the writer-mistake handling above.
+- All 1,772 other `.wav` files on the development machine (Windows, KiCad, Unreal Engine samples) are exact too.
 
 ### Wwise SoundBanks (BNK) and file packages (PCK)
 
@@ -83,7 +89,7 @@ FSB5 is FMOD Studio's format (about 2013 on); FSB4 is FMOD Ex's (about 2006 to 2
   - Files are named after the track, with characters a file name can't hold replaced by `_`. Tracks with the same name get their number added, and unnamed ones are `track<N>`. Each file is read back and checked against the track before it's written.
 - All FSB5 codecs are named: PCM, GameCube ADPCM, IMA ADPCM, VAG/HEVAG, XMA, MPEG, CELT, ATRAC9, xWMA, Vorbis, FMOD ADPCM, Opus. FSB4 names each track's own (a bank can mix them): PCM, MPEG, IMA ADPCM, VAG, XMA, GameCube ADPCM, CELT.
 
-No real FMOD banks were available to test against, so FMOD support is checked by test files written independently of audscan. Scanning 81 GB of a non-FMOD game's archives found no false FSB4 or FSB5 banks.
+FSB5 is checked against real banks. **Slay the Spire 2** keeps FMOD Studio `.bank` files inside its Godot package: all 11 FSB5 banks are found (2,509 named Vorbis tracks, about 7 hours of audio), each ending exactly where its `.bank` does, and every split track is a one-track bank of exactly its length. So are the two in **VTube Studio**'s Unity `.resource` file (Unity stores AudioClips as FSB5). FSB4 is checked by test files only. Scanning 81 GB of a non-FMOD game's archives found no false FSB4 or FSB5 banks.
 
 ### Ogg
 

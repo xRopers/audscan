@@ -4,7 +4,11 @@
 //! banks...) aren't audio and are left alone, so an FSB5 inside a bank is still found.
 //!
 //! Wwise is recognised by its own codec tags (Vorbis 0xFFFF, Opus, PTADPCM), an `akd `
-//! chunk, or by being RIFX at all: Wwise is practically the only writer of RIFX WAVE.
+//! chunk, by being RIFX at all (Wwise is practically the only writer of RIFX WAVE), or
+//! by its 0x18-byte fmt chunk for ADPCM (tag 2, which is MS ADPCM elsewhere, with a
+//! 0x32-byte fmt) and PCM (tag 0xFFFE without the extensible format's subformat GUID).
+//! Lengths are checked against real Wwise files (BioShock Infinite, Aniimo, Once Human):
+//! Opus and PTADPCM keep the sample count at fmt+0x18, like Vorbis's 0x42-byte fmt.
 
 use std::ops::Range;
 
@@ -71,6 +75,11 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
     } else if prefix {
         note = Some(format!("prefetch: the first {} of {declared_size} bytes (the rest is streamed)", data.len()));
         data.len()
+    } else if declared_size == data.len() as u64 + 1 {
+        // At the end of the input, one byte short: Valve's tools count the pad byte after
+        // an odd last chunk without writing it (7,155 of Left 4 Dead 2's WAVs).
+        note = Some("the RIFF size counts a pad byte the file doesn't have".into());
+        data.len()
     } else {
         return Err(Reject::Bad(format!("runs past the end of the file ({declared_size} bytes declared, {} left)", data.len())));
     };
@@ -80,9 +89,10 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
     while pos + 8 <= end {
         let id: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
         let body = pos + 8;
-        let len = r.u32(pos + 4);
+        let mut len = r.u32(pos + 4);
         let mut body_end = body.saturating_add(len as usize);
         if body_end > end {
+            let complete = chunks.fmt.is_some() && chunks.data.is_some();
             // Some writers get the RIFF size wrong (Unreal's test WAVs count a 20-byte
             // fmt chunk as 16), but a data chunk that still fits shows the real end.
             if &id == b"data" && body_end <= data.len() {
@@ -90,6 +100,18 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
                 end = body_end;
             } else if prefix && data.len() < declared_size as usize {
                 body_end = end;
+            } else if body_end == end + 1 && end == data.len() {
+                // The last chunk a byte short at the end of the input (an odd data size
+                // for 16-bit samples, in Left 4 Dead 2's commentary).
+                note.get_or_insert_with(|| format!("the last chunk ({}) is a byte short", id.escape_ascii()));
+                body_end = end;
+                len -= 1;
+            } else if complete {
+                // After the audio, a chunk that makes no sense: a writer that didn't pad an
+                // odd chunk before it, so this one is read a byte early. The RIFF size
+                // still says where the file ends.
+                note.get_or_insert_with(|| format!("a malformed chunk at +{pos:#x} after the audio is ignored"));
+                break;
             } else {
                 let id = id.escape_ascii().to_string();
                 return Err(Reject::Bad(format!("the {id:?} chunk runs past the end of the RIFF data")));
@@ -119,14 +141,17 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
     let mut tag = r.u16(f);
     let (channels, sample_rate, block_align) = (r.u16(f + 2), r.u32(f + 4), r.u16(f + 12));
     let bits = if fmt.len() >= 16 { r.u16(f + 14) } else { 0 };
-    // WAVE_FORMAT_EXTENSIBLE: the real tag starts the subformat GUID.
-    if tag == 0xFFFE && fmt.len() >= 40 {
-        tag = r.u16(f + 24);
+    // Wwise's own fmt layout for ADPCM and PCM: 0x18 bytes, no subformat GUID.
+    let wwise_fmt = fmt.len() == 0x18 && matches!(tag, 0x0002 | 0xFFFE);
+    if tag == 0xFFFE {
+        // WAVE_FORMAT_EXTENSIBLE: the real tag starts the subformat GUID. Wwise's short
+        // form leaves it out, and is PCM.
+        tag = if fmt.len() >= 40 { r.u16(f + 24) } else { 0x0001 };
     }
     if channels == 0 || sample_rate == 0 {
         return Err(Reject::Bad(format!("the fmt chunk says {channels} channels at {sample_rate} Hz")));
     }
-    let wwise = WWISE_CODECS.contains(&tag) || chunks.akd || r.big_endian;
+    let wwise = WWISE_CODECS.contains(&tag) || chunks.akd || r.big_endian || wwise_fmt;
 
     // As declared: prefetch media hold only the start of it.
     let data_len = chunks.data_len;
@@ -139,7 +164,20 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
             let vorb = chunks.vorb.filter(|v| v.len() >= 4).map(|v| v.start);
             vorb.or((fmt.len() >= 0x42).then_some(f + 0x18)).map(|p| u64::from(r.u32(p)))
         }
-        _ => chunks.fact.filter(|c| c.len() >= 4).map(|c| u64::from(r.u32(c.start))),
+        // Opus and PTADPCM: at fmt+0x18.
+        0x3040 | 0x3041 | 0x8311 if fmt.len() >= 0x1C => Some(u64::from(r.u32(f + 0x18))),
+        _ => chunks
+            .fact
+            .filter(|c| c.len() >= 4)
+            .map(|c| u64::from(r.u32(c.start)))
+            .or_else(|| match tag {
+                // IMA ADPCM without a fact chunk: per channel a 4-byte header, then 2
+                // samples a byte. MS IMA counts the header's sample too; Wwise's (like
+                // Xbox IMA) doesn't: its byte rate is exactly 64 samples per 36 bytes.
+                0x0002 if wwise => ima_samples(data_len, block_align, channels, false),
+                0x0011 => ima_samples(data_len, block_align, channels, true),
+                _ => None,
+            }),
     };
 
     Ok(AudioInfo {
@@ -153,6 +191,18 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
         tracks: Vec::new(),
         note,
     })
+}
+
+/// Samples per channel in `data_len` bytes of IMA ADPCM with `block_align`-byte blocks,
+/// counting each block header's sample if `header_sample`.
+fn ima_samples(data_len: u64, block_align: u16, channels: u16, header_sample: bool) -> Option<u64> {
+    let (block, header) = (u64::from(block_align), 4 * u64::from(channels));
+    if block <= header {
+        return None;
+    }
+    let per_block = |bytes: u64| (bytes - header) * 2 / u64::from(channels) + u64::from(header_sample);
+    let partial = data_len % block;
+    Some(data_len / block * per_block(block) + if partial > header { per_block(partial) } else { 0 })
 }
 
 /// How a bank stores PCM samples, for [`pcm_wav`].
@@ -299,6 +349,39 @@ mod tests {
     }
 
     #[test]
+    fn writer_quirks_at_the_end_are_tolerated_and_noted() {
+        // RIFF size counting a pad byte that isn't there, after an odd last chunk.
+        let mut file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 10]), (b"VDAT", b"odd")]);
+        file.pop();
+        let info = Riff.parse(&file).unwrap();
+        assert_eq!(info.size, file.len() as u64);
+        assert!(info.note.unwrap().contains("pad byte"));
+        // A data chunk a byte longer than the file.
+        let mut file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 10])]);
+        file.pop();
+        let size = u32::from_le_bytes(file[4..8].try_into().unwrap()) - 1;
+        file[4..8].copy_from_slice(&size.to_le_bytes());
+        let info = Riff.parse(&file).unwrap();
+        assert_eq!((info.size, info.samples), (file.len() as u64, Some(4)));
+        assert!(info.note.unwrap().contains("a byte short"));
+        // Nonsense after the audio.
+        let mut file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 10]), (b"junk", &[0xFF; 12])]);
+        let at = file.len() - 16;
+        file[at..at + 4].copy_from_slice(&[0xFF; 4]);
+        file[at + 4..at + 8].copy_from_slice(&0x7FFF_0000u32.to_le_bytes());
+        let info = Riff.parse(&file).unwrap();
+        assert_eq!(info.size, file.len() as u64);
+        assert!(info.note.unwrap().contains("malformed chunk"));
+        // None of that applies away from the end of the input, or before the audio.
+        let mut file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 10])]);
+        file.truncate(file.len() - 2);
+        assert!(matches!(Riff.parse(&file), Err(Reject::Bad(_))));
+        let mut file = wave(&[(b"LIST", &[0; 4]), (b"fmt ", &PCM16_MONO), (b"data", &[0; 10])]);
+        file[16..20].copy_from_slice(&0x7FFF_0000u32.to_le_bytes());
+        assert!(matches!(Riff.parse(&file), Err(Reject::Bad(_))));
+    }
+
+    #[test]
     fn prefetch_media_are_read_from_their_header() {
         let file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 1000])]);
         assert!(matches!(Riff.parse(&file[..100]), Err(Reject::Bad(_))));
@@ -321,6 +404,53 @@ mod tests {
         let pcm = Pcm { bytes: 1, float: false, signed_8bit: true, big_endian: false };
         let (wav, _) = pcm_wav(pcm, 1, 8000, 3, &[0x00, 0x7F, 0x80]);
         assert!(wav.ends_with(&[0x80, 0xFF, 0x00, 0]), "unsigned, and padded to even");
+    }
+
+    /// A 0x18-byte fmt chunk as Wwise writes it for ADPCM and PCM.
+    fn wwise_fmt(tag: u16, channels: u16, block_align: u16, bits: u16) -> Vec<u8> {
+        let mut f = Vec::new();
+        for v in [tag, channels] {
+            f.extend_from_slice(&v.to_le_bytes());
+        }
+        f.extend_from_slice(&48000u32.to_le_bytes());
+        f.extend_from_slice(&(48000 * u32::from(block_align)).to_le_bytes());
+        for v in [block_align, bits, 6, bits] {
+            f.extend_from_slice(&v.to_le_bytes());
+        }
+        f.extend_from_slice(&4u32.to_le_bytes()); // channel mask
+        f
+    }
+
+    #[test]
+    fn wwise_adpcm_and_pcm_by_their_short_fmt() {
+        // Two 36-byte mono IMA blocks and a partial one of 20 bytes: 64 + 64 + 32 samples.
+        let file = wave(&[(b"fmt ", &wwise_fmt(2, 1, 36, 4)), (b"JUNK", &[0; 4]), (b"data", &[0; 92])]);
+        let info = Riff.parse(&file).unwrap();
+        assert_eq!((info.codec.as_str(), info.wwise, info.samples), ("Wwise IMA ADPCM", true, Some(160)));
+        // MS IMA counts the header sample: 65 per 36-byte mono block.
+        let mut ima = wwise_fmt(0x11, 1, 36, 4);
+        ima.truncate(20);
+        let info = Riff.parse(&wave(&[(b"fmt ", &ima), (b"data", &[0; 72])])).unwrap();
+        assert_eq!((info.codec.as_str(), info.samples), ("IMA ADPCM", Some(130)));
+        let file = wave(&[(b"fmt ", &wwise_fmt(0xFFFE, 2, 4, 16)), (b"data", &[0; 40])]);
+        let info = Riff.parse(&file).unwrap();
+        assert_eq!((info.codec.as_str(), info.wwise, info.samples), ("PCM 16-bit", true, Some(10)));
+        // MS ADPCM keeps its own name: its fmt chunk is longer.
+        let mut ms = wwise_fmt(2, 1, 256, 4);
+        ms.resize(50, 0);
+        let info = Riff.parse(&wave(&[(b"fmt ", &ms), (b"data", &[0; 4])])).unwrap();
+        assert_eq!((info.codec.as_str(), info.wwise), ("MS ADPCM", false));
+    }
+
+    #[test]
+    fn wwise_opus_and_ptadpcm_lengths_are_in_the_fmt_chunk() {
+        for tag in [0x3041u16, 0x8311] {
+            let mut fmt = wwise_fmt(tag, 2, 72, 4);
+            fmt.resize(0x1C, 0);
+            fmt[0x18..0x1C].copy_from_slice(&39001u32.to_le_bytes());
+            let info = Riff.parse(&wave(&[(b"fmt ", &fmt), (b"data", &[0; 8])])).unwrap();
+            assert_eq!(info.samples, Some(39001), "{tag:#x}");
+        }
     }
 
     #[test]
