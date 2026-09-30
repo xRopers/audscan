@@ -20,6 +20,15 @@ pub enum Error {
 
     #[error("manifest names an unsafe output file {0:?} (must be a plain file name)")]
     BadFilename(String),
+
+    #[error("pack: {0}")]
+    Pack(String),
+
+    #[error("audio {id} at offset {offset:#x}: {reason}")]
+    Edit { id: u32, offset: u64, reason: String },
+
+    #[error("verify failed for audio {id} at offset {offset:#x}: {reason}")]
+    Verify { id: u32, offset: u64, reason: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

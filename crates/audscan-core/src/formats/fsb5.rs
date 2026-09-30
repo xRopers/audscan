@@ -10,14 +10,17 @@
 //!
 //! A track can be split out ([`split_track`]): PCM as a WAV, anything else as a bank of
 //! one track, since the raw codec data (Vorbis without its setup headers, XMA, ADPCM...)
-//! can't be played without the header describing it.
+//! can't be played without the header describing it. [`replace_tracks`] puts new tracks
+//! in, for pack.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use memchr::memchr;
 
 use crate::format::{AudioFormat, AudioInfo, Container, Reject, Track, u32_le, u64_le};
-use crate::formats::riff::{Pcm, Riff, pcm_wav};
+use crate::formats::riff::{Pcm, Riff, pcm_wav, wav_data};
+use crate::formats::{Piece, relayout};
 
 pub struct Fsb5;
 
@@ -243,6 +246,232 @@ fn one_track_bank(bank: &[u8], layout: &Layout, index: usize, track: &Track, dat
     out.extend(names);
     out.extend_from_slice(data);
     out
+}
+
+/// The data-offset bits of a packed track header (offset / 32, bits 7 to 33).
+const OFFSET_BITS: u64 = 0x07FF_FFFF << 7;
+
+/// Extra-chunk type of loop points (start and end sample).
+const CHUNK_LOOP: u32 = 3;
+
+/// A track header's extra chunks, as (type, body); `entry` is the packed u64 and its
+/// chunks, as [`read`] checked them.
+fn extra_chunks(entry: &[u8]) -> Vec<(u32, &[u8])> {
+    let mut chunks = Vec::new();
+    let mut more = u64_le(entry, 0) & 1 != 0;
+    let mut pos = 8;
+    while more && pos + 4 <= entry.len() {
+        let chunk = u32_le(entry, pos);
+        let len = (chunk >> 1 & 0xFF_FFFF) as usize;
+        more = chunk & 1 != 0;
+        chunks.push((chunk >> 25, &entry[pos + 4..(pos + 4 + len).min(entry.len())]));
+        pos += 4 + len;
+    }
+    chunks
+}
+
+/// A track header: the packed u64 (data offset 0) and its extra chunks.
+fn track_entry(rate_index: u64, channel_code: u64, samples: u64, chunks: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let packed = u64::from(!chunks.is_empty()) | rate_index << 1 | channel_code << 5 | samples << 34;
+    let mut out = packed.to_le_bytes().to_vec();
+    for (i, (kind, body)) in chunks.iter().enumerate() {
+        let more = u32::from(i + 1 < chunks.len());
+        out.extend_from_slice(&(more | (body.len() as u32) << 1 | kind << 25).to_le_bytes());
+        out.extend_from_slice(body);
+    }
+    out
+}
+
+/// A replacement track: its header (data offset 0), its data, and what it should read as.
+struct NewTrack {
+    entry: Vec<u8>,
+    data: Vec<u8>,
+    channels: u16,
+    sample_rate: u32,
+    samples: u64,
+}
+
+/// The bank with some of its tracks (by index) replaced. A replacement is a one-track FSB5
+/// bank of the same codec (its track header, extra chunks included, and its data are
+/// used), or for a PCM bank also a WAV of the bank's sample format. Tracks keep their
+/// names and order; the sample data is laid out again with each track 32-byte aligned.
+/// The result is read back and checked. Returns the bank and notes.
+pub(crate) fn replace_tracks(bank: &[u8], new: &BTreeMap<usize, Vec<u8>>) -> Result<(Vec<u8>, Vec<String>), String> {
+    let (info, layout) = read(bank).map_err(|_| "the bank no longer reads as FSB5".to_string())?;
+    let codec = codec_name(layout.mode).unwrap_or("?");
+    let mut notes = Vec::new();
+    let mut replaced = BTreeMap::new();
+    for (&i, file) in new {
+        let t = info.tracks.get(i).ok_or_else(|| format!("the bank has no track {i}"))?;
+        let what = format!("track {i} ({})", t.name.as_deref().unwrap_or("no name"));
+        let track = if file.starts_with(b"FSB5") {
+            track_from_bank(file, layout.mode)
+        } else if file.starts_with(b"RIFF") && PCM.contains(&layout.mode) {
+            track_from_wav(file, layout.mode, &bank[layout.entries[i].clone()], &mut notes, &what)
+        } else if file.starts_with(b"RIFF") {
+            Err(format!("this bank is {codec}, so a WAV can't go in; give a one-track FSB5 bank of {codec} (FMOD's FSBank makes them)"))
+        } else {
+            Err("the replacement isn't an FSB5 bank or a WAV".to_string())
+        };
+        replaced.insert(i, track.map_err(|e| format!("{what}: {e}"))?);
+    }
+
+    let headers = u32_le(bank, 0xC) as usize;
+    let names = u32_le(bank, 0x10) as usize;
+    let data_start = layout.header + headers + names;
+    // The distinct data offsets, in order; tracks sharing one move together.
+    let mut order: Vec<usize> = (0..info.tracks.len()).collect();
+    order.sort_by_key(|&i| info.tracks[i].offset);
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        match groups.last_mut() {
+            Some(g) if info.tracks[g[0]].offset == info.tracks[i].offset => g.push(i),
+            _ => groups.push(vec![i]),
+        }
+    }
+    if let Some(shared) = groups.iter().find(|g| g.len() > 1 && g.iter().any(|i| replaced.contains_key(i))) {
+        return Err(format!("tracks {shared:?} share their data, so one can't be replaced alone"));
+    }
+    let pieces: Vec<Piece> = groups
+        .iter()
+        .map(|g| {
+            let t = &info.tracks[g[0]];
+            let (start, end) = (t.offset - data_start as u64, t.offset + t.size - data_start as u64);
+            let old = &bank[t.offset as usize..(t.offset + t.size) as usize];
+            Piece { start, end, bytes: replaced.get(&g[0]).map_or(old, |n: &NewTrack| &n.data), align: 32 }
+        })
+        .collect();
+    let (sample_data, starts) = relayout(&bank[data_start..info.size as usize], 0, &pieces);
+
+    let mut piece_of = vec![0; info.tracks.len()];
+    for (p, g) in groups.iter().enumerate() {
+        g.iter().for_each(|&i| piece_of[i] = p);
+    }
+    let mut table = Vec::with_capacity(headers);
+    for (i, range) in layout.entries.iter().enumerate() {
+        let entry = replaced.get(&i).map_or(&bank[range.clone()], |n| &n.entry);
+        let units = starts[piece_of[i]] / 32;
+        if units << 7 & !OFFSET_BITS != 0 {
+            return Err("the sample data would grow past what FSB5 can address".into());
+        }
+        table.extend_from_slice(&(u64_le(entry, 0) & !OFFSET_BITS | units << 7).to_le_bytes());
+        table.extend_from_slice(&entry[8..]);
+    }
+    let mut out = bank[..layout.header].to_vec();
+    let too_big = |_| "the bank would pass 4 GiB".to_string();
+    out[0xC..0x10].copy_from_slice(&u32::try_from(table.len()).map_err(too_big)?.to_le_bytes());
+    out[0x14..0x18].copy_from_slice(&u32::try_from(sample_data.len()).map_err(too_big)?.to_le_bytes());
+    out.extend(table);
+    out.extend_from_slice(&bank[layout.header + headers..data_start]);
+    out.extend(sample_data);
+
+    // Read it back: every track where it should be, the new ones as intended.
+    let (back, _) = read(&out).map_err(|e| format!("the new bank doesn't read back: {e:?}"))?;
+    if back.tracks.len() != info.tracks.len() {
+        return Err("the new bank reads back with a different number of tracks".into());
+    }
+    for (i, (t, old)) in back.tracks.iter().zip(&info.tracks).enumerate() {
+        let intended = pieces[piece_of[i]].bytes;
+        let held = &out[t.offset as usize..(t.offset + t.size) as usize];
+        // A track's data runs to the next one's, so either may have padding after it.
+        let same_data = held.starts_with(intended) || intended.starts_with(held);
+        let sound = match replaced.get(&i) {
+            Some(n) => (n.channels, n.sample_rate, Some(n.samples)),
+            None => (old.channels, old.sample_rate, old.samples),
+        };
+        if !same_data || (t.channels, t.sample_rate, t.samples) != sound || t.name != old.name {
+            return Err(format!("track {i} reads back differently from the new bank"));
+        }
+    }
+    Ok((out, notes))
+}
+
+/// A one-track bank's track, for a bank of codec `mode`.
+fn track_from_bank(file: &[u8], mode: u32) -> Result<NewTrack, String> {
+    let (info, layout) = read(file).map_err(|e| match e {
+        Reject::Bad(reason) => format!("the replacement isn't a usable FSB5 bank: {reason}"),
+        Reject::NoMatch => "the replacement isn't an FSB5 bank".to_string(),
+    })?;
+    if info.size != file.len() as u64 {
+        return Err(format!("the replacement has {} bytes after the end of its bank", file.len() as u64 - info.size));
+    }
+    if info.tracks.len() != 1 {
+        return Err(format!("the replacement bank has {} tracks; give a bank of one", info.tracks.len()));
+    }
+    if layout.mode != mode {
+        let name = |m| codec_name(m).unwrap_or("?");
+        return Err(format!("the replacement is {}, but the bank is {}; they must match", name(layout.mode), name(mode)));
+    }
+    let t = &info.tracks[0];
+    let entry = file[layout.entries[0].clone()].to_vec();
+    let data = file[t.offset as usize..(t.offset + t.size) as usize].to_vec();
+    Ok(NewTrack { entry, data, channels: t.channels, sample_rate: t.sample_rate, samples: t.samples.unwrap_or(0) })
+}
+
+/// A WAV's samples as a track of a PCM bank of codec `mode`, keeping the old track
+/// header's extra chunks (loop points only if they still fit).
+fn track_from_wav(file: &[u8], mode: u32, old_entry: &[u8], notes: &mut Vec<String>, what: &str) -> Result<NewTrack, String> {
+    let (info, data) = wav_data(file).map_err(|e| match e {
+        Reject::Bad(reason) => format!("the replacement isn't a usable WAV: {reason}"),
+        Reject::NoMatch => "the replacement isn't a WAV".to_string(),
+    })?;
+    let bits = [8, 16, 24, 32, 32][(mode - 1) as usize];
+    let expected = if mode == 5 { "IEEE float 32-bit".to_string() } else { format!("PCM {bits}-bit") };
+    if info.codec != expected || info.wwise {
+        return Err(format!("the replacement is {}{}, but this bank holds {expected}; convert it to that", info.codec, if info.wwise { " (a WEM)" } else { "" }));
+    }
+    let frame = bits / 8 * usize::from(info.channels);
+    let frames = data.len() / frame;
+    let mut samples = file[data.start..data.start + frames * frame].to_vec();
+    if mode == 1 {
+        // WAV's 8-bit samples are unsigned, FSB's signed.
+        samples.iter_mut().for_each(|b| *b ^= 0x80);
+    }
+    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::new();
+    for (kind, body) in extra_chunks(old_entry) {
+        match kind {
+            CHUNK_CHANNELS | CHUNK_RATE => {}
+            CHUNK_LOOP if body.len() >= 8 && u64::from(u32_le(body, 4)) >= frames as u64 => {
+                notes.push(format!("{what}: its loop points were past the new end, so they were dropped"));
+            }
+            _ => chunks.push((kind, body.to_vec())),
+        }
+    }
+    let rate_index = match RATES.iter().position(|&r| r == info.sample_rate) {
+        Some(i) => i as u64,
+        None => {
+            chunks.push((CHUNK_RATE, info.sample_rate.to_le_bytes().to_vec()));
+            u64_le(old_entry, 0) >> 1 & 0xF
+        }
+    };
+    let channel_code = match CHANNELS.iter().position(|&c| c == info.channels) {
+        Some(i) => i as u64,
+        None => {
+            let channels = u8::try_from(info.channels).map_err(|_| format!("{} channels is more than FSB5 holds", info.channels))?;
+            chunks.push((CHUNK_CHANNELS, vec![channels]));
+            0
+        }
+    };
+    if frames as u64 >= 1 << 30 {
+        return Err("the replacement is longer than FSB5 can hold".into());
+    }
+    Ok(NewTrack {
+        entry: track_entry(rate_index, channel_code, frames as u64, &chunks),
+        data: samples,
+        channels: info.channels,
+        sample_rate: info.sample_rate,
+        samples: frames as u64,
+    })
+}
+
+/// The bank grown by `extra` zero bytes at the end of its sample data.
+pub(crate) fn pad(bank: &[u8], extra: usize) -> Option<Vec<u8>> {
+    let (info, _) = read(bank).ok()?;
+    let size = u32::try_from(u64::from(u32_le(bank, 0x14)) + extra as u64).ok()?;
+    let mut out = bank[..info.size as usize].to_vec();
+    out[0x14..0x18].copy_from_slice(&size.to_le_bytes());
+    out.resize(out.len() + extra, 0);
+    Some(out)
 }
 
 #[cfg(test)]

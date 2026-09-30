@@ -156,7 +156,7 @@ pub fn track_bytes<'a>(entry: &AudioEntry, bytes: &'a [u8], index: usize) -> Res
 /// that can be split out, checked to stay inside the bank's folder and to lie inside the
 /// bank. Tracks that would get the same name (ignoring case, as Windows does) get their
 /// index added.
-fn split_files(entry: &AudioEntry) -> Result<Vec<(String, usize)>> {
+pub fn split_files(entry: &AudioEntry) -> Result<Vec<(String, usize)>> {
     let fail = |reason: String| Error::Audio { id: entry.id, offset: entry.offset, reason };
     let mut files = Vec::new();
     let mut used = HashSet::new();

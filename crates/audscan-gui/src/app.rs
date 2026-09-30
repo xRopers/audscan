@@ -1,6 +1,7 @@
-//! The window: menus, the table of everything found, and the details pane with a bank's
-//! tracks and the selected sound's waveform and playback. State lives in [`Session`];
-//! slow work runs through [`Jobs`] and [`Previewer`].
+//! The window: menus, the table of everything found, the details pane with a bank's
+//! tracks and the selected sound's waveform and playback, and the pack window that puts
+//! replaced sounds back. State lives in [`Session`]; slow work runs through [`Jobs`] and
+//! [`Previewer`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,8 +12,8 @@ use egui_extras::{Column, TableBuilder};
 
 use crate::jobs::{Jobs, finish};
 use crate::player::Player;
-use crate::preview::Previewer;
-use crate::session::{self, Level, Preview, Selection, Session, clock, entry_seconds, human_size, length};
+use crate::preview::{PreviewKey, Previewer};
+use crate::session::{self, EditSource, Level, Preview, Selection, Session, clock, entry_seconds, human_size, length};
 use crate::widgets::{REJECTED_COLOR, file_strip, format_color, muted, waveform};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,13 @@ pub struct App {
     pub filter: String,
     show_log: bool,
     pub show_rejected: bool,
+    pub show_pack: bool,
+    /// Play the original of an edited sound instead of its replacement.
+    pub show_original: bool,
+    /// An action waiting for the user to agree to discard unpacked edits.
+    pub confirm: Option<Action>,
+    /// Set once the user agreed to exit, so the window may close.
+    allow_close: bool,
     title: String,
 }
 
@@ -68,13 +76,26 @@ impl App {
             filter: String::new(),
             show_log: false,
             show_rejected: false,
+            show_pack: false,
+            show_original: false,
+            confirm: None,
+            allow_close: false,
             title: String::new(),
         }
     }
 
     // ----- actions -------------------------------------------------------------------
 
+    /// Do `action`, first asking whether to discard edits that haven't been packed.
     pub fn request(&mut self, action: Action) {
+        if self.session.edits.is_empty() {
+            self.perform(action);
+        } else {
+            self.confirm = Some(action);
+        }
+    }
+
+    fn perform(&mut self, action: Action) {
         match action {
             Action::OpenFile(path) => self.open_file(path),
             Action::Rescan => self.rescan(),
@@ -82,7 +103,10 @@ impl App {
                 self.deselect();
                 self.session.close();
             }
-            Action::Exit => self.ctx.send_viewport_cmd(ViewportCommand::Close),
+            Action::Exit => {
+                self.allow_close = true;
+                self.ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
         }
     }
 
@@ -109,13 +133,28 @@ impl App {
     pub fn select(&mut self, selection: Selection) {
         if self.selected != Some(selection) {
             self.stop();
+            self.show_original = false;
         }
         self.selected = Some(selection);
         self.scroll_to_selected = true;
-        let (Some(file), Some(entry)) = (&self.session.file, self.session.entry(selection.id)) else { return };
+        self.request_preview();
+    }
+
+    /// What the preview should show for the selection: its replacement, if it has one and
+    /// the original isn't asked for.
+    pub fn preview_key(&self) -> Option<PreviewKey> {
+        let selection = self.selected?;
+        let edit = self.session.edit_path(selection).filter(|_| !self.show_original).cloned();
+        Some(PreviewKey { selection, edit, generation: self.session.edits_generation })
+    }
+
+    /// Start decoding the selection's preview, unless it's shown or on its way already.
+    fn request_preview(&mut self) {
+        let Some(key) = self.preview_key() else { return };
+        let (Some(file), Some(entry)) = (&self.session.file, self.session.entry(key.selection.id)) else { return };
         // A bank as a whole isn't one sound: only its tracks are previewed.
-        if selection.track.is_some() || entry.tracks.is_empty() {
-            self.preview.request(selection, file.data.clone(), entry.clone());
+        if key.selection.track.is_some() || entry.tracks.is_empty() {
+            self.preview.request(key, file.data.clone(), entry.clone());
         }
     }
 
@@ -127,7 +166,7 @@ impl App {
 
     /// The selection's preview, once decoded.
     pub fn shown(&self) -> Option<&Result<Arc<Preview>, String>> {
-        self.preview.get(self.selected?)
+        self.preview.get(&self.preview_key()?)
     }
 
     pub fn is_playing(&self) -> bool {
@@ -137,7 +176,7 @@ impl App {
     /// Play the selection from `fraction` (0 to 1) of the way in.
     pub fn play(&mut self, fraction: f32) {
         let Some(selection) = self.selected else { return };
-        let Some(Ok(preview)) = self.preview.get(selection) else { return };
+        let Some(Ok(preview)) = self.shown() else { return };
         let pcm = preview.pcm.clone();
         let from = (f64::from(fraction.clamp(0.0, 1.0)) * pcm.frames() as f64) as u64;
         match self.player.play(pcm, from) {
@@ -184,6 +223,82 @@ impl App {
         });
     }
 
+    /// Choose a replacement for a file or track, then check it (in the background) before
+    /// taking it.
+    pub fn replace_with_dialog(&mut self, selection: Selection) {
+        let Some(entry) = self.session.entry(selection.id) else { return };
+        let (kind, extensions): (&str, &[&str]) = match (selection.track.and_then(|t| entry.tracks.get(t)), entry.format) {
+            (Some(t), _) if t.extension.as_deref() == Some("bnk") => ("a SoundBank", &["bnk"]),
+            (Some(_), audscan_core::Container::Fsb5) if entry.codec.starts_with("PCM") => ("a WAV or one-track FSB5", &["wav", "fsb"]),
+            (Some(_), audscan_core::Container::Fsb5) => ("a one-track FSB5", &["fsb"]),
+            (Some(_), _) => ("a WEM", &["wem"]),
+            (None, _) => ("a file of the same kind", &[entry.extension()]),
+        };
+        let title = format!("Replacement for {} ({kind})", session::describe(selection));
+        let Some(path) = rfd::FileDialog::new().set_title(title).add_filter(kind, extensions).add_filter("All files", &["*"]).pick_file() else {
+            return;
+        };
+        self.replace_with(selection, path);
+    }
+
+    /// Check `path` as a replacement for a file or track in the background; take it if it
+    /// can go in.
+    pub fn replace_with(&mut self, selection: Selection, path: PathBuf) {
+        let (Some(data), Some(scanned)) = (self.data(), &self.session.scanned) else { return };
+        let manifest = scanned.manifest.clone();
+        self.jobs.start("Checking the replacement", move || {
+            let result = session::check_replacement(&data, &manifest, selection, &path);
+            finish("Replace", result, move |s, plan| {
+                s.set_edit(selection, path);
+                s.info(format!("{}: {}", session::describe(selection), session::placement_text(&plan)));
+                for note in plan.notes {
+                    s.warn(format!("{}: {note}", session::describe(selection)));
+                }
+            })
+        });
+    }
+
+    fn import_with_dialog(&mut self) {
+        let Some(dir) = rfd::FileDialog::new().set_title("Folder written by Extract, with edited files").pick_folder() else { return };
+        self.import_edits_from(dir);
+    }
+
+    /// Take the edits found in a folder written by Extract (with split tracks).
+    pub fn import_edits_from(&mut self, dir: PathBuf) {
+        let (Some(data), Some(scanned)) = (self.data(), &self.session.scanned) else { return };
+        let manifest = scanned.manifest.clone();
+        self.jobs.start("Looking for edits", move || {
+            finish("Import edits", session::import_edits(&data, &manifest, &dir), move |s, found| s.set_imported_edits(&dir, found))
+        });
+    }
+
+    /// Pack the edits in the background: a dry run (`output` is `None`), or written there.
+    pub fn start_pack(&mut self, output: Option<PathBuf>) {
+        let (Some(data), Some(scanned)) = (self.data(), &self.session.scanned) else { return };
+        let manifest = scanned.manifest.clone();
+        let edits = self.session.edits.clone();
+        let label = if output.is_some() { "Packing" } else { "Dry run" };
+        self.jobs.start(label, move || {
+            let result = session::read_edits(&edits).and_then(|edits| session::run_pack(&data, &manifest, &edits, output.as_deref()));
+            finish("Pack", result, Session::set_pack_report)
+        });
+    }
+
+    fn pick_pack_output(&mut self) {
+        let Some(file) = &self.session.file else { return };
+        let name = session::default_output_name(&file.path);
+        let mut dialog = rfd::FileDialog::new().set_title("Write the packed file").set_file_name(&name);
+        if let Some(dir) = file.path.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.save_file() else { return };
+        if same_file(&file.path, &path) {
+            self.session.error("Pack: that's the file being scanned; the input is never overwritten, so choose another name");
+            return;
+        }
+        self.start_pack(Some(path));
+    }
+
     /// Extract everything (or only `only`) to a folder the user picks.
     fn extract_with_dialog(&mut self, only: Option<u32>, split: bool, convert: bool) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Extract into folder").pick_folder() {
@@ -226,6 +341,11 @@ impl App {
         if self.selected.is_some_and(|s| self.session.entry(s.id).is_none()) {
             self.deselect();
         }
+        // Edits may have changed what the selection's preview should show.
+        self.request_preview();
+        if self.playing.is_some() && self.shown().is_none() {
+            self.stop();
+        }
         if self.playing.is_some() && !self.player.playing() {
             self.playing = None;
         }
@@ -253,6 +373,8 @@ impl App {
 
         self.log_window();
         self.rejected_window();
+        self.pack_window();
+        self.confirm_modal();
         if self.jobs.busy() || self.preview.loading() || self.is_playing() {
             self.ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
@@ -260,6 +382,10 @@ impl App {
 
     fn handle_input(&mut self, ui: &Ui) {
         let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && !self.session.edits.is_empty() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            self.confirm = Some(Action::Exit);
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()));
         if let Some(path) = dropped
             && !self.jobs.busy()
@@ -367,10 +493,32 @@ impl App {
                         ui.close();
                         self.stop();
                     }
+                    ui.separator();
+                    if ui.add_enabled(!busy, egui::Button::new("Replace selected…")).clicked() {
+                        ui.close();
+                        self.replace_with_dialog(sel);
+                    }
+                    if ui.add_enabled(self.session.edit_path(sel).is_some(), egui::Button::new("Revert selected")).clicked() {
+                        ui.close();
+                        self.session.revert(sel);
+                    }
                 }
                 None => {
                     ui.add_enabled(false, egui::Button::new("Select a sound for more"));
                 }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(has_audio && !busy, egui::Button::new("Import edits from folder…"))
+                .on_hover_text("A folder written by Extract (split), with some files replaced by edited ones")
+                .clicked()
+            {
+                ui.close();
+                self.import_with_dialog();
+            }
+            if ui.add_enabled(has_audio, egui::Button::new(format!("Pack… ({} edited)", self.session.edits.len()))).clicked() {
+                ui.close();
+                self.show_pack = true;
             }
         });
         ui.menu_button("View", |ui| {
@@ -394,6 +542,11 @@ impl App {
             }
             if ui.add_enabled(has_audio && !busy, egui::Button::new("Extract all…")).clicked() {
                 self.extract_with_dialog(None, true, true);
+            }
+            let edited = self.session.edits.len();
+            let pack = if edited > 0 { format!("Pack {edited} edited…") } else { "Pack…".to_string() };
+            if ui.add_enabled(has_audio, egui::Button::new(pack)).on_hover_text("Put replaced sounds back into a copy of the file").clicked() {
+                self.show_pack = true;
             }
             ui.separator();
             ui.label("Filter:");
@@ -584,6 +737,9 @@ impl App {
                         ui.label(length(entry_seconds(a)));
                     });
                     row.col(|ui| {
+                        if self.session.edits.contains_key(&a.id) {
+                            ui.colored_label(EDITED_COLOR, "edited");
+                        }
                         ui.add(egui::Label::new(contents(a)).truncate());
                     });
                     if row.response().clicked() {
@@ -637,7 +793,15 @@ impl App {
             {
                 self.extract_with_dialog(Some(entry.id), true, true);
             }
+            self.edit_buttons(ui, whole, &format!("the whole {}", entry.label()));
         });
+        if let Some(edit) = self.session.edits.get(&entry.id) {
+            let text = match edit {
+                EditSource::File(path) => format!("Replaced by {}", path.display()),
+                EditSource::Tracks(tracks) => format!("{} track(s) replaced", tracks.len()),
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(EDITED_COLOR)).truncate());
+        }
         ui.separator();
 
         if !entry.tracks.is_empty() {
@@ -648,10 +812,25 @@ impl App {
         self.player_pane(ui, &entry, selection);
     }
 
+    /// Replace and Revert for a file or track.
+    fn edit_buttons(&mut self, ui: &mut Ui, selection: Selection, what: &str) {
+        let busy = self.jobs.busy();
+        if ui.add_enabled(!busy, egui::Button::new("Replace…")).on_hover_text(format!("Choose a file to put in place of {what} when packing")).clicked() {
+            self.replace_with_dialog(selection);
+        }
+        if self.session.edit_path(selection).is_some() && ui.button("Revert").on_hover_text("Forget the replacement").clicked() {
+            self.session.revert(selection);
+        }
+    }
+
     fn tracks_table(&mut self, ui: &mut Ui, entry: &AudioEntry) {
         ui.push_id("tracks", |ui| {
             ui.style_mut().interaction.selectable_labels = false;
             let current = self.selected.and_then(|s| s.track);
+            let edited: Vec<usize> = match self.session.edits.get(&entry.id) {
+                Some(EditSource::Tracks(tracks)) => tracks.keys().copied().collect(),
+                _ => Vec::new(),
+            };
             let mut clicked = None;
             TableBuilder::new(ui)
                 .id_salt("tracks")
@@ -687,6 +866,9 @@ impl App {
                                 Some(lang) if lang != "sfx" => format!("{} [{lang}]", t.display_name()),
                                 _ => t.display_name(),
                             };
+                            if edited.contains(&i) {
+                                ui.colored_label(EDITED_COLOR, "edited");
+                            }
                             ui.add(egui::Label::new(name).truncate());
                         });
                         row.col(|ui| {
@@ -737,10 +919,28 @@ impl App {
                 if t.extension.as_deref() == Some("wem") && ui.add_enabled(!busy, egui::Button::new("Save as Ogg/WAV…")).clicked() {
                     self.save_item(selection, true);
                 }
+                if t.extension.is_some() {
+                    self.edit_buttons(ui, selection, "this track");
+                }
             });
             if let Some(note) = &t.note {
                 ui.colored_label(ui.visuals().warn_fg_color, note);
             }
+        }
+        if let Some(path) = self.session.edit_path(selection).cloned() {
+            let text = RichText::new(format!("Replaced by {}", path.display())).color(EDITED_COLOR);
+            ui.add(egui::Label::new(text).truncate()).on_hover_text(path.display().to_string());
+            ui.horizontal(|ui| {
+                ui.label("Play:");
+                let mut original = self.show_original;
+                ui.radio_value(&mut original, false, "the replacement");
+                ui.radio_value(&mut original, true, "the original");
+                if original != self.show_original {
+                    self.stop();
+                    self.show_original = original;
+                    self.request_preview();
+                }
+            });
         }
         match self.shown().cloned() {
             None => {
@@ -773,6 +973,142 @@ impl App {
                     ui.weak("click the waveform to play from there; Space plays and stops");
                 });
             }
+        }
+    }
+
+    fn pack_window(&mut self) {
+        let mut open = self.show_pack;
+        let (mut dry_run, mut write, mut open_packed, mut revert) = (false, false, None, None);
+        egui::Window::new("Pack").open(&mut open).default_size([720.0, 380.0]).show(&self.ctx.clone(), |ui| {
+            let busy = self.jobs.busy();
+            if self.session.edits.is_empty() {
+                ui.label("No edits yet. Replace a file or one of a bank's tracks from the details pane or the Audio menu, or import a folder written by Extract in which you've replaced files.");
+            } else {
+                ui.label(format!("{} edited file(s):", self.session.edits.len()));
+                egui::ScrollArea::vertical().id_salt("pack-edits").max_height(140.0).show(ui, |ui| {
+                    egui::Grid::new("pack-edits").striped(true).num_columns(3).spacing([12.0, 3.0]).show(ui, |ui| {
+                        for (&id, edit) in &self.session.edits {
+                            for (track, path) in edit.files() {
+                                let selection = Selection { id, track };
+                                ui.label(session::describe(selection));
+                                ui.label(path.display().to_string());
+                                if ui.small_button("Revert").clicked() {
+                                    revert = Some(selection);
+                                }
+                                ui.end_row();
+                            }
+                        }
+                    });
+                });
+            }
+            ui.add_space(6.0);
+            ui.weak("Banks and packages are rebuilt around new tracks. A file that shrinks is padded to keep its place; one that grows only fits at the end of the file (size fields in front of it are updated). The input is never changed: the output is a new file, read back and checked before it's kept.");
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let can = !busy && !self.session.edits.is_empty();
+                if ui.add_enabled(can, egui::Button::new("Dry run")).clicked() {
+                    dry_run = true;
+                }
+                if ui.add_enabled(can, egui::Button::new("Write packed file…")).clicked() {
+                    write = true;
+                }
+            });
+            if let Some(report) = &self.session.last_pack {
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt("pack-report").show(ui, |ui| {
+                    egui::Grid::new("pack-report").striped(true).num_columns(4).spacing([12.0, 3.0]).show(ui, |ui| {
+                        for h in ["#", "Offset", "Size", "Result"] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        for plan in &report.audio {
+                            ui.label(plan.id.to_string());
+                            ui.monospace(format!("{:#x}", plan.offset));
+                            ui.label(format!("{} -> {}", human_size(plan.old_size), human_size(plan.new_size)));
+                            ui.vertical(|ui| {
+                                let what = match &plan.outcome {
+                                    audscan_core::Outcome::Replaced => "replaced".to_string(),
+                                    audscan_core::Outcome::TracksReplaced(t) => format!("{} track(s) replaced", t.len()),
+                                    audscan_core::Outcome::Unchanged => String::new(),
+                                };
+                                ui.label(format!("{what}{}{}", if what.is_empty() { "" } else { "; " }, session::placement_text(plan)));
+                                for note in &plan.notes {
+                                    ui.colored_label(ui.visuals().warn_fg_color, note);
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+                    for f in &report.fields {
+                        ui.label(format!("Size field at {:#x}: {} -> {} (it measures {})", f.offset, f.old, f.new, f.measures));
+                    }
+                    if report.output_len != report.input_len {
+                        ui.label(format!("The output is {} bytes; the input is {}.", report.output_len, report.input_len));
+                    }
+                    match &report.written {
+                        Some(path) => {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Written and verified: {}", path.display()));
+                                if ui.button("Open it").clicked() {
+                                    open_packed = Some(path.clone());
+                                }
+                            });
+                        }
+                        None => {
+                            ui.label(format!("Dry run: {} file(s) would change.", report.changed()));
+                        }
+                    }
+                });
+            }
+        });
+        self.show_pack = open;
+        if let Some(selection) = revert {
+            self.session.revert(selection);
+        }
+        if dry_run {
+            self.start_pack(None);
+        }
+        if write {
+            self.pick_pack_output();
+        }
+        if let Some(path) = open_packed {
+            self.request(Action::OpenFile(path));
+        }
+    }
+
+    fn confirm_modal(&mut self) {
+        let Some(action) = self.confirm.clone() else { return };
+        let what = match &action {
+            Action::OpenFile(_) => "Open another file",
+            Action::Rescan => "Scan again",
+            Action::Close => "Close the file",
+            Action::Exit => "Exit",
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("confirm")).show(&self.ctx.clone(), |ui| {
+            ui.set_max_width(380.0);
+            ui.heading("Unpacked edits");
+            ui.label(format!(
+                "{what}? The {} edit(s) haven't been packed and will be forgotten (the replacement files stay where they are).",
+                self.session.edits.len()
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Discard edits").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.confirm = None;
+                self.perform(action);
+            }
+            Some(false) => self.confirm = None,
+            None => {}
         }
     }
 
@@ -841,6 +1177,9 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
         _ => false,
     }
 }
+
+/// Marks edited files and tracks.
+pub const EDITED_COLOR: Color32 = Color32::from_rgb(230, 150, 40);
 
 fn level_color(ui: &Ui, level: Level) -> Color32 {
     match level {

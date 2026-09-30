@@ -1,16 +1,16 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use audscan_core::{
-    AudioEntry, Container, ConvertError, ExtractOptions, FoundAudio, Manifest, Rejected, ScanOptions, SourceInfo, convert_wem,
-    extract_all, input, scan,
+    AudioEntry, AudioPlan, Container, ConvertError, ExtractOptions, FoundAudio, Manifest, Outcome, PackOptions, Placement,
+    Rejected, ScanOptions, SourceInfo, convert_wem, extract_all, input, load_edits, pack, scan,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "audscan", version, about = "Find and extract audio (WAV, Wwise WEM/BNK/PCK, FMOD FSB4/FSB5, Ogg) inside binary files")]
+#[command(name = "audscan", version, about = "Find, extract and put back audio (WAV, Wwise WEM/BNK/PCK, FMOD FSB4/FSB5, Ogg) inside binary files")]
 struct Cli {
     /// Print machine-readable JSON on stdout instead of text
     #[arg(long, global = true)]
@@ -60,6 +60,33 @@ enum Command {
         #[arg(long)]
         convert: bool,
         /// Filters for the fresh scan (ignored with --manifest)
+        #[command(flatten)]
+        filters: ScanArgs,
+    },
+    /// Put edited audio from an extract folder back into a copy of the input: a changed
+    /// file (.wav, .wem, .bnk, .pck, .fsb, .ogg, replaced by one of the same kind) or a
+    /// changed track split out of a bank or package (a .wem or .bnk; for FSB5 a one-track
+    /// .fsb of the bank's codec, or a .wav for a PCM bank). Banks are rebuilt around new
+    /// tracks. A file that shrinks is padded to keep its place; one that grows only fits
+    /// at the end of the input
+    Pack {
+        file: PathBuf,
+        /// Manifest from `audscan scan -o` [default: scan the input again]
+        #[arg(short, long)]
+        manifest: Option<PathBuf>,
+        /// Folder written by `audscan extract` (with `--split` to edit tracks)
+        #[arg(short = 'd', long = "dir", value_name = "DIR")]
+        dir: PathBuf,
+        /// Output file [default: <input stem>.packed.<ext> next to the input]
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Show what would change without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Pack even if the input's size or CRC no longer matches the manifest
+        #[arg(long)]
+        force: bool,
+        /// Filters for the fresh scan (ignored with --manifest): use the ones extract used
         #[command(flatten)]
         filters: ScanArgs,
     },
@@ -203,16 +230,56 @@ fn run(cli: Cli) -> Result<()> {
                 bail!("{failed} file(s) couldn't be converted");
             }
         }
+        Command::Pack { file, manifest, dir, output, dry_run, force, filters } => {
+            let data = input::open(&file)?;
+            let manifest = load_or_scan(&file, &data, manifest.as_deref(), &filters)?;
+            let found = load_edits(&data, &manifest, &dir)?;
+            let result = pack(&data, &manifest, &found.edits, &PackOptions { verify_source: !force })?;
+            let output = output.unwrap_or_else(|| default_output(&file));
+            let write = !dry_run && result.changed() > 0;
+            if write {
+                if same_file(&output, &file) {
+                    bail!("the output would overwrite the input; choose another --output");
+                }
+                result.write_file(&data, &output)?;
+            }
+            if cli.json {
+                let rows: Vec<_> = result.audio.iter().map(PackJson::from).collect();
+                let fields: Vec<_> = result
+                    .fields
+                    .iter()
+                    .map(|f| serde_json::json!({ "offset": f.offset, "big_endian": f.big_endian, "old": f.old, "new": f.new, "measures": f.measures }))
+                    .collect();
+                let written = write.then(|| output.display().to_string());
+                print_json(&serde_json::json!({
+                    "audio": rows,
+                    "fields": fields,
+                    "input_size": result.input_len,
+                    "output_size": result.output_len,
+                    "unedited_files": found.unchanged,
+                    "output": written,
+                }))?;
+            } else {
+                for plan in &result.audio {
+                    print_plan(plan, &manifest);
+                }
+                for f in &result.fields {
+                    let order = if f.big_endian { "BE" } else { "LE" };
+                    println!("size field at {:#x} ({order}): {} -> {} (it measures {})", f.offset, f.old, f.new, f.measures);
+                }
+                if result.output_len != result.input_len {
+                    println!("the output is {} bytes; the input was {}", result.output_len, result.input_len);
+                }
+                match (result.changed(), dry_run) {
+                    (0, _) => println!("nothing to pack: no edited audio in {} ({} unedited file(s))", dir.display(), found.unchanged),
+                    (n, true) => println!("dry run: {n} file(s) would change; nothing written"),
+                    (n, false) => println!("{n} file(s) packed into {} (verified)", output.display()),
+                }
+            }
+        }
         Command::Extract { file, manifest, dir, force, split, convert, filters } => {
             let data = input::open(&file)?;
-            let manifest = match &manifest {
-                Some(path) => Manifest::load(path)?,
-                None => {
-                    let opts = filters.options();
-                    let found = scan(&data, &opts).audio;
-                    Manifest::new(SourceInfo::describe(&file, &data), opts, &found)
-                }
-            };
+            let manifest = load_or_scan(&file, &data, manifest.as_deref(), &filters)?;
             if manifest.audio.is_empty() {
                 bail!("no audio to extract");
             }
@@ -248,6 +315,91 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The manifest at `path`, or one from scanning `data` now.
+fn load_or_scan(file: &Path, data: &[u8], path: Option<&Path>, filters: &ScanArgs) -> Result<Manifest> {
+    Ok(match path {
+        Some(path) => Manifest::load(path)?,
+        None => {
+            let opts = filters.options();
+            let found = scan(data, &opts).audio;
+            Manifest::new(SourceInfo::describe(file, data), opts, &found)
+        }
+    })
+}
+
+/// `game.pak` -> `game.packed.pak` next to it.
+fn default_output(input: &Path) -> PathBuf {
+    let stem = input.file_stem().map_or_else(|| "output".into(), |s| s.to_string_lossy().into_owned());
+    let name = match input.extension() {
+        Some(ext) => format!("{stem}.packed.{}", ext.to_string_lossy()),
+        None => format!("{stem}.packed"),
+    };
+    input.with_file_name(name)
+}
+
+fn print_plan(plan: &AudioPlan, manifest: &Manifest) {
+    let entry = manifest.audio.iter().find(|a| a.id == plan.id);
+    let label = entry.map_or_else(String::new, AudioEntry::label);
+    let what = match &plan.outcome {
+        Outcome::Replaced => "replaced".to_string(),
+        Outcome::TracksReplaced(tracks) => {
+            let names: Vec<String> = tracks
+                .iter()
+                .map(|&i| match entry.and_then(|e| e.tracks.get(i)).map(|t| t.display_name()) {
+                    Some(name) if !name.is_empty() => format!("#{i} {name}"),
+                    _ => format!("#{i}"),
+                })
+                .collect();
+            format!("{} track(s) replaced: {}", tracks.len(), names.join(", "))
+        }
+        Outcome::Unchanged => "unchanged (the edit gives the same bytes)".to_string(),
+    };
+    println!("{:>#12x}  {label:<6}  {what}", plan.offset);
+    if plan.outcome != Outcome::Unchanged {
+        let fit = match plan.placement {
+            Placement::InPlace => "the same size, written in place".to_string(),
+            Placement::Padded { by, inside: true } => format!("{by} bytes smaller, padded inside to keep its place"),
+            Placement::Padded { by, inside: false } => format!("{by} bytes smaller, zeros after it keep its place"),
+            Placement::Resized => "it ends the input, so the output changes size with it".to_string(),
+        };
+        println!("{:>12}  {} -> {} bytes: {fit}", "", plan.old_size, plan.new_size);
+    }
+    for note in &plan.notes {
+        println!("{:>12}  note: {note}", "");
+    }
+}
+
+#[derive(Serialize)]
+struct PackJson<'a> {
+    id: u32,
+    offset: u64,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tracks: Vec<usize>,
+    old_size: u64,
+    new_size: u64,
+    placement: &'static str,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    notes: &'a [String],
+}
+
+impl<'a> From<&'a AudioPlan> for PackJson<'a> {
+    fn from(p: &'a AudioPlan) -> Self {
+        let (outcome, tracks) = match &p.outcome {
+            Outcome::Replaced => ("replaced", Vec::new()),
+            Outcome::TracksReplaced(t) => ("tracks_replaced", t.clone()),
+            Outcome::Unchanged => ("unchanged", Vec::new()),
+        };
+        let placement = match p.placement {
+            Placement::InPlace => "in_place",
+            Placement::Padded { inside: true, .. } => "padded_inside",
+            Placement::Padded { inside: false, .. } => "padded_after",
+            Placement::Resized => "resized",
+        };
+        Self { id: p.id, offset: p.offset, outcome, tracks, old_size: p.old_size, new_size: p.new_size, placement, notes: &p.notes }
+    }
 }
 
 #[derive(Serialize)]
@@ -371,7 +523,7 @@ fn print_rejected(rejected: &[Rejected]) {
     }
 }
 
-fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+fn same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,

@@ -1,6 +1,6 @@
 # audscan
 
-Find audio inside any binary file and extract it.
+Find audio inside any binary file, extract it, and put edited sounds back.
 
 Games usually keep their sounds as standard files packed inside their own archives: Wwise `.wem`, `.bnk` and `.pck`, FMOD sound banks, Ogg, plain WAV. audscan finds them by their headers, works out each one's exact size, and writes them out as ordinary files, without needing a tool for that particular engine.
 
@@ -10,10 +10,11 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 - **Extract** them as `.wav`, `.wem`, `.bnk`, `.pck`, `.fsb` and `.ogg` files, byte for byte. With `--split`, every sound inside a bank or package also comes out as a file of its own: Wwise WEMs named by their ID, FMOD tracks by their name.
 - **Browse and play** it all in a desktop app: a table of everything found, each bank's tracks, a waveform and playback.
 - **Convert** WEMs to files any player opens: Wwise Vorbis and Opus to Ogg (rewrapped, not re-encoded, so nothing is lost), PCM, IMA ADPCM and PTADPCM to WAV. `audscan convert` for WEM files, or `extract --convert` for everything extracted.
+- **Put edited sounds back** into a copy of the file: replace a whole file, a WEM inside a Wwise bank or package, or a track of an FMOD bank. Banks are rebuilt around the new sound and the result is checked before it's written.
 
 ![audscan's desktop app: an FMOD bank's tracks, one selected with its waveform](docs/images/audscan-gui-bank.png)
 
-**Status: early.** Scan, extract, splitting, WEM conversion and the desktop app work. More formats and putting edited sounds back are next.
+**Status: early.** Scan, extract, splitting, WEM conversion, putting sounds back and the desktop app work. More formats are next.
 
 ## Why audscan over vgmstream
 
@@ -21,6 +22,7 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 - **Finds audio anywhere.** audscan scans any file for audio by its headers: packed archives, extracted blobs, memory dumps, formats nobody has written a reader for. It found 44,000 WEMs in Once Human's 81 GB of archives in a little over 2 minutes, without knowing its archive format.
 - **Extracts the originals.** Every file comes out byte for byte, as `.wem`, `.bnk`, `.fsb` or `.ogg`, with its exact size checked, so it can be modded, compared or put back.
+- **Puts sounds back.** Swap a WEM in a SoundBank or package, or a track in an FMOD bank, and audscan rebuilds the bank, fits it back into the game's file and checks the result. vgmstream only reads.
 - **Splits banks into files you can use.** Each sound in a Wwise bank or package becomes its own `.wem`, named by its ID and sorted by language. Each FMOD track becomes a WAV or a one-track `.fsb` that vgmstream and FMOD's tools still open.
 - **Converts without re-encoding.** Wwise Vorbis and Opus become standard Ogg files holding the same packets, a fraction of the size of the uncompressed WAV a decoder writes, with the audio unchanged.
 - **Scriptable and safe.** A JSON manifest, `--json` output, and batch extraction of whole games in one command. The input is never modified.
@@ -51,6 +53,7 @@ audscan extract game.pak -d audio/ --formats wem   # scan and extract in one go,
 audscan scan game.pak --formats fmod        # FSB4 and FSB5 only (and wwise: WEM, BNK, PCK)
 audscan extract game.pak -d audio/ --split --convert   # every WEM also as .ogg or .wav
 audscan convert audio/*.wem -d playable/    # convert WEM files you already have
+audscan pack game.pak -m manifest.json -d audio/ -o game.new.pak   # put edited files back
 ```
 
 ```
@@ -72,7 +75,7 @@ audscan convert audio/*.wem -d playable/    # convert WEM files you already have
 
 The rows starting `#` list what's inside a bank or package (`--tracks`).
 
-Every command takes `--json`. The input is never modified. `extract` refuses a file that no longer matches the manifest (`--force` overrides). `--show-rejected` lists headers that look like audio but can't be used, and why (a WAV with no `fmt ` chunk, a file cut off by the end of the input...).
+Every command takes `--json`. The input is never modified. `extract` and `pack` refuse a file that no longer matches the manifest (`--force` overrides). `--show-rejected` lists headers that look like audio but can't be used, and why (a WAV with no `fmt ` chunk, a file cut off by the end of the input...).
 
 ## Desktop app
 
@@ -88,11 +91,50 @@ Open a file (or drop one on the window) and it's scanned straight away. Everythi
 
 **Audio > Extract all…** extracts everything, split and converted. Up and down arrows move through the list.
 
+To put sounds back, pick **Replace…** next to a file or a track and choose the new one. It's checked straight away (the right kind of file, and whether it fits), marked as edited, and plays instead of the original (switch to **the original** to compare). **Audio > Import edits from folder…** takes every file you've changed in a folder written by Extract. The **Pack** window shows what's edited, does a dry run, and writes the packed file, which is read back and checked. The app asks before closing a file with edits that haven't been packed.
+
+![Packing a replaced WEM in the desktop app](docs/images/audscan-gui-pack.png)
+
 It plays what audscan can decode: WAV, WEM (Vorbis, PCM, IMA ADPCM, PTADPCM) and Ogg Vorbis. Opus, FLAC and FMOD's own Vorbis aren't played yet (FMOD strips the Vorbis setup that decoding needs). Playback uses Windows' own audio output, so it's Windows-only; elsewhere the app works without it.
 
 ![A WAV selected in the desktop app, with its waveform](docs/images/audscan-gui-wav.png)
 
 The screenshots use made-up sounds from `docs/make_demo.py`.
+
+## Putting sounds back
+
+```bash
+audscan extract game.pak -m manifest.json -d audio/ --split        # 1. extract, with each bank's sounds
+# 2. replace files in audio/ with your edited ones, keeping their names
+audscan pack game.pak -m manifest.json -d audio/ --dry-run         # 3. see what would change
+audscan pack game.pak -m manifest.json -d audio/ -o game.new.pak   # 4. write a new file
+```
+
+`pack` compares the folder with the original and puts back every file that changed. The input is never modified: the output is a new file (`game.packed.pak` by default), written to a temporary file, read back and checked before it's kept.
+
+| What was found | Replace it with |
+|---|---|
+| A WAV, WEM, Ogg, FSB4 or FSB5 bank, SoundBank or package, whole | a file of the same kind: a WEM for a WEM, a WAV for a WAV |
+| A WEM or SoundBank inside a Wwise `.bnk` or `.pck` (split out as `<ID>.wem`, `<ID>.bnk`) | a WEM (or SoundBank) in the same byte order |
+| A track of an FSB5 bank (split out as `<name>.fsb` or `.wav`) | a one-track `.fsb` of the bank's codec, from FMOD's FSBank or split out by audscan; for a PCM bank, also a WAV of its sample format |
+
+audscan doesn't encode audio: make a new WEM with Wwise (in the codec the game uses) and an FSB with FMOD's FSBank. It says so when a WEM's codec changes, since the game's sound objects may expect the old one.
+
+How a changed sound fits:
+
+- **Banks and packages are rebuilt.** A SoundBank's media index and data are rewritten with the media moved to fit, keeping Wwise's 16-byte alignment, and a sound object that records the media's size (in `HIRC`) gets the new one. A package's lookup tables get the new sizes and positions, each file keeping its block alignment. An FSB5 bank gets the new track's header (with its own codec setup) and data, 32-byte aligned; the track keeps its name.
+- **Smaller** than the original: padded to keep its place, inside the file where its format allows (a RIFF `JUNK` chunk, a SoundBank's data section, an FSB5 bank's sample data), with zeros after it otherwise. Nothing else in the file moves.
+- **At the end of the input** (a `.bnk`, `.pck` or `.wem` on its own, or the FSB5 bank that ends an FMOD Studio `.bank`), it can grow or shrink: the output changes size, and size fields in front of it are updated: a RIFF header and chunk sizes that run to the end of the file, and an index entry giving its offset and size (the `SNDH` chunk of a `.bank`).
+- **Bigger, in the middle of an archive**, it doesn't fit, and `pack` says by how many bytes. The archive's own index would need rewriting, which audscan can't do for formats it doesn't know. Make the sound shorter, or pack the bank on its own if the game loads it as a separate file.
+
+Not yet: prefetch media (replace the whole sound where it's streamed from), FSB4 tracks one by one (replace the whole `.fsb`), and growing a file in the middle of an archive.
+
+Checked on real games, each result scanned again and played with vgmstream r2117:
+
+- **Aniimo**: in 12 SoundBanks, a WEM swapped for another from the same bank (Vorbis and Opus, bigger and smaller). Every WEM in each rebuilt bank is the intended one; vgmstream plays the new sound exactly as the replacement and the others as before.
+- **BioShock Infinite**: 3 WEMs replaced in the 486 MB SFX package, one growing from 388 KB to 10.9 MB. All 613 files in the new package are the intended ones, with their IDs and languages.
+- **Slay the Spire 2**: in a `.bank` cut out of the game, a track swapped for one 3.5 times its size. The RIFF, `SNDH` and `SND` sizes are updated, and vgmstream plays all 6 tracks, the new one exactly as its source.
+- **Once Human**: a WEM in the middle of a 287 MB archive replaced by a smaller one: padded with `JUNK`, nothing else in the archive changed, and it decodes exactly as the replacement.
 
 ## Formats
 

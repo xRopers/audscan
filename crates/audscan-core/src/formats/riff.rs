@@ -253,6 +253,47 @@ pub(crate) fn pcm_wav(pcm: Pcm, channels: u16, sample_rate: u32, frames: u64, da
     (out, frames as u64)
 }
 
+/// A little-endian WAV's details and where its `data` chunk's bytes are (within the file's
+/// own length).
+pub(crate) fn wav_data(file: &[u8]) -> Result<(AudioInfo, Range<usize>), Reject> {
+    let info = Riff.parse(file)?;
+    if info.big_endian {
+        return Err(Reject::Bad("it's big-endian (RIFX)".into()));
+    }
+    let end = info.size as usize;
+    let mut pos = 12;
+    while pos + 8 <= end {
+        let len = u32::from_le_bytes(file[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = pos + 8;
+        if &file[pos..pos + 4] == b"data" {
+            return Ok((info, body..body.saturating_add(len).min(end)));
+        }
+        pos = body.saturating_add(len).saturating_add(len % 2);
+    }
+    Err(Reject::Bad("no data chunk".into()))
+}
+
+/// The file grown by `extra` bytes as a `JUNK` chunk at its end (with the RIFF size to
+/// match), or `None` if that can't be done: under 8 bytes, an odd number (chunks come in
+/// even lengths), or a file whose RIFF size doesn't match its length.
+pub(crate) fn pad(file: &[u8], extra: usize) -> Option<Vec<u8>> {
+    if extra < 8 || !extra.is_multiple_of(2) || file.len() < 12 || !file.len().is_multiple_of(2) {
+        return None;
+    }
+    let r = Reader { data: file, big_endian: file[3] == b'X' };
+    if r.u32(4) as usize + 8 != file.len() {
+        return None;
+    }
+    let size = u32::try_from(file.len() - 8 + extra).ok()?;
+    let bytes = |v: u32| if r.big_endian { v.to_be_bytes() } else { v.to_le_bytes() };
+    let mut out = file.to_vec();
+    out[4..8].copy_from_slice(&bytes(size));
+    out.extend_from_slice(b"JUNK");
+    out.extend_from_slice(&bytes((extra - 8) as u32));
+    out.resize(file.len() + extra, 0);
+    Some(out)
+}
+
 /// The chunks that matter, by where their bodies are (the first of each kind).
 #[derive(Default)]
 struct Chunks {

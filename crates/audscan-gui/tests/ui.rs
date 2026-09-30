@@ -155,3 +155,90 @@ fn extract_all_split_and_converted() {
     let bank = input.fixture.expected.iter().find(|e| e.container == "fsb4" && e.codec == "mixed").unwrap();
     assert!(dir.path().join(format!("{:08x}", bank.offset)).join("menu_theme.wav").exists());
 }
+
+#[test]
+fn replace_a_track_preview_it_and_pack() {
+    let input = input();
+    let mut h = harness();
+    open(&mut h, &input);
+    let bank = input.fixture.expected.iter().position(|e| e.label == "fsb5" && e.codec == "PCM 16-bit").unwrap() as u32;
+    let track = Selection { id: bank, track: Some(0) };
+    h.state_mut().select(track);
+    h.run_steps(2);
+
+    // A shorter WAV for the bank's one PCM track: checked, then taken.
+    let mut rng = audscan_fixtures::Rng::new(5);
+    let wav = input.path.with_file_name("new.wav");
+    std::fs::write(&wav, audscan_fixtures::pcm_wav(1, 22050, 16, 250, &mut rng)).unwrap();
+    h.state_mut().replace_with(track, wav.clone());
+    settle(&mut h);
+    assert_eq!(h.state().session.edit_path(track), Some(&wav));
+    assert!(h.state().session.log.iter().any(|l| l.text.contains("smaller: padded inside")), "{:?}", h.state().session.log.last());
+    h.run_steps(2);
+    assert!(!h.get_all_by_label("edited").collect::<Vec<_>>().is_empty());
+
+    // The preview plays the replacement, or the original when asked.
+    wait_until(&mut h, "the replacement's preview", |app| app.shown().is_some());
+    assert_eq!(h.state().shown().unwrap().as_ref().unwrap().pcm.frames(), 250);
+    h.get_by_label("the original").click();
+    h.run_steps(2);
+    wait_until(&mut h, "the original's preview", |app| app.shown().is_some());
+    assert_eq!(h.state().shown().unwrap().as_ref().unwrap().pcm.frames(), 500);
+
+    // Something that can't go in is refused, and the edit stays.
+    let wem = input.path.with_file_name("new.wem");
+    std::fs::write(&wem, audscan_fixtures::pcm_wem(1, 22050, 10, &mut rng)).unwrap();
+    h.state_mut().replace_with(track, wem);
+    settle(&mut h);
+    assert!(h.state().session.log.last().unwrap().text.starts_with("Replace:"));
+    assert_eq!(h.state().session.edit_path(track), Some(&wav));
+
+    // Dry run from the pack window, then write.
+    h.get_by_label("Pack 1 edited…").click();
+    h.run_steps(2);
+    h.get_by_label("Dry run").click();
+    h.run_steps(1);
+    settle(&mut h);
+    assert_eq!(h.state().session.last_pack.as_ref().unwrap().changed(), 1);
+    h.get_by_label("Dry run: 1 file(s) would change.");
+    let out = input.path.with_file_name("packed.bin");
+    h.state_mut().start_pack(Some(out.clone()));
+    settle(&mut h);
+    let packed = std::fs::read(&out).unwrap();
+    assert_eq!(packed.len(), input.fixture.data.len());
+    let found = audscan_core::scan(&packed, &audscan_core::ScanOptions::default()).audio;
+    let now = found.iter().find(|a| a.offset == input.fixture.expected[bank as usize].offset as u64).unwrap();
+    assert_eq!(now.info.tracks[0].samples, Some(250));
+    h.get_by_label_contains("Written and verified");
+}
+
+#[test]
+fn unpacked_edits_are_confirmed_before_they_are_dropped() {
+    let input = input();
+    let mut h = harness();
+    open(&mut h, &input);
+    let out_dir = input.path.with_file_name("out");
+    h.state_mut().extract_to(out_dir.clone(), None, true, false);
+    settle(&mut h);
+    // Edit the loose PCM WEM in the extract folder, then import.
+    let mut rng = audscan_fixtures::Rng::new(6);
+    let wem = &input.fixture.expected[3];
+    std::fs::write(out_dir.join(format!("{:08x}.wem", wem.offset)), audscan_fixtures::pcm_wem(1, 48000, 20, &mut rng)).unwrap();
+    h.state_mut().import_edits_from(out_dir);
+    settle(&mut h);
+    assert_eq!(h.state().session.edits.len(), 1);
+
+    h.state_mut().request(Action::Close);
+    h.run_steps(2);
+    h.get_by_label("Unpacked edits");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().confirm.is_none());
+    assert!(h.state().session.file.is_some());
+    h.state_mut().request(Action::Close);
+    h.run_steps(2);
+    h.get_by_label("Discard edits").click();
+    h.run_steps(2);
+    assert!(h.state().session.file.is_none());
+    assert!(h.state().session.edits.is_empty());
+}

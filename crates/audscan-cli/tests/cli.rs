@@ -163,3 +163,56 @@ fn extract_convert_turns_wems_into_ogg() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("1 WEM(s) converted to Ogg/WAV"));
     assert!(out_dir.join("00000040.wem").exists() && out_dir.join("00000040.ogg").exists());
 }
+
+#[test]
+fn pack_puts_edited_files_and_tracks_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = audscan_fixtures::audio_archive();
+    let input = write_fixture(dir.path(), &f);
+    let out_dir = dir.path().join("out");
+    assert!(audscan().arg("extract").arg(&input).arg("-d").arg(&out_dir).arg("--split").output().unwrap().status.success());
+
+    // Nothing edited yet.
+    let out = audscan().arg("pack").arg(&input).arg("-d").arg(&out_dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing to pack"));
+
+    // A smaller PCM WEM for the loose one, and a new WAV for the v0 FSB5 bank's track.
+    let mut rng = audscan_fixtures::Rng::new(42);
+    let wem_at = f.expected[3].offset;
+    fs::write(out_dir.join(format!("{wem_at:08x}.wem")), audscan_fixtures::pcm_wem(1, 48000, 100, &mut rng)).unwrap();
+    let fsb_at = f.expected.iter().find(|e| e.label == "fsb5" && e.codec == "PCM 16-bit").unwrap().offset;
+    let wav = audscan_fixtures::pcm_wav(1, 22050, 16, 250, &mut rng);
+    fs::write(out_dir.join(format!("{fsb_at:08x}")).join("track0.wav"), &wav).unwrap();
+
+    let packed = dir.path().join("packed.bin");
+    let out = audscan().arg("pack").arg(&input).arg("-d").arg(&out_dir).arg("-o").arg(&packed).arg("--dry-run").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("dry run: 2 file(s) would change"), "{text}");
+    assert!(text.contains("padded inside"), "{text}");
+    assert!(!packed.exists());
+
+    let out = audscan().args(["pack", "--json"]).arg(&input).arg("-d").arg(&out_dir).arg("-o").arg(&packed).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let audio = json["audio"].as_array().unwrap();
+    assert_eq!(audio.len(), 2);
+    assert_eq!(audio[0]["outcome"], "replaced");
+    assert_eq!(audio[1]["outcome"], "tracks_replaced");
+    assert_eq!(audio[1]["tracks"][0], 0);
+    assert_eq!(json["output_size"], json["input_size"]);
+
+    // The packed file scans to the same files, with the new track in the bank.
+    let out = audscan().args(["scan", "--json"]).arg(&packed).output().unwrap();
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let audio = json["audio"].as_array().unwrap();
+    assert_eq!(audio.len(), f.expected.len());
+    let bank = audio.iter().find(|a| a["offset"] == fsb_at as u64).unwrap();
+    assert_eq!(bank["tracks"][0]["samples"], 250);
+    assert_eq!(bank["tracks"][0]["sample_rate"], 22050);
+
+    // Refuses to overwrite the input.
+    let out = audscan().arg("pack").arg(&input).arg("-d").arg(&out_dir).arg("-o").arg(&input).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("overwrite the input"));
+}
