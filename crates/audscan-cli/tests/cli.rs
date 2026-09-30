@@ -122,3 +122,44 @@ fn extract_split_writes_wwise_files_and_lists_them() {
     assert!(text.contains("100 [english(us)]"), "{text}");
     assert!(text.contains("bnk BE"), "{text}");
 }
+
+#[test]
+fn convert_writes_ogg_and_wav_and_reports_what_it_cant() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = audscan_fixtures::Rng::new(11);
+    let vorbis = dir.path().join("music.wem");
+    fs::write(&vorbis, audscan_fixtures::wwise_vorbis_wem(2, 500, 0, &[0, 1, 1, 0], &mut rng)).unwrap();
+    let ima = dir.path().join("step.wem");
+    fs::write(&ima, audscan_fixtures::wwise_ima_wem(1, 2, &mut rng)).unwrap();
+    let out = audscan().arg("convert").arg(&vorbis).arg(&ima).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(dir.path().join("music.ogg").exists() && dir.path().join("step.wav").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2 converted, 0 not"));
+
+    // Into another folder, as JSON, with one that can't be converted: the rest still are.
+    let cut = dir.path().join("cut.wem");
+    let whole = audscan_fixtures::wwise_vorbis_wem(2, 500, 0, &[0, 1, 1, 0], &mut rng);
+    fs::write(&cut, &whole[..whole.len() - 10]).unwrap();
+    let out_dir = dir.path().join("out");
+    let out = audscan().args(["convert", "--json", "-d"]).arg(&out_dir).arg(&vorbis).arg(&cut).output().unwrap();
+    assert!(!out.status.success());
+    let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json[0]["codec"], "Wwise Vorbis");
+    assert!(json[1]["error"].as_str().unwrap().contains("bytes are here"));
+    assert!(out_dir.join("music.ogg").exists());
+}
+
+#[test]
+fn extract_convert_turns_wems_into_ogg() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rng = audscan_fixtures::Rng::new(12);
+    let mut data = rng.bytes(64);
+    data.extend(audscan_fixtures::wwise_vorbis_wem(1, 300, 0, &[0, 0, 1], &mut rng));
+    let input = dir.path().join("game.pak");
+    fs::write(&input, &data).unwrap();
+    let out_dir = dir.path().join("out");
+    let out = audscan().arg("extract").arg(&input).arg("-d").arg(&out_dir).arg("--convert").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 WEM(s) converted to Ogg/WAV"));
+    assert!(out_dir.join("00000040.wem").exists() && out_dir.join("00000040.ogg").exists());
+}

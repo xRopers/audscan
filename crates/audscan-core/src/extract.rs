@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use crate::error::{Error, Result, io_err};
+use crate::convert::{ConvertError, convert_wem};
 use crate::format::Container;
 use crate::formats::{fsb4, fsb5};
 use crate::manifest::{AudioEntry, Manifest};
@@ -20,11 +21,14 @@ pub struct ExtractOptions {
     /// and SoundBanks as they are, FSB4 and FSB5 tracks as WAV (PCM) or one-track banks.
     /// See [`Track::split_filename`], [`fsb4::split_track`] and [`fsb5::split_track`].
     pub split: bool,
+    /// Also convert every WEM written (extracted or split out) to Ogg or WAV next to it,
+    /// with [`convert_wem`]. A WEM that can't be converted is noted, not an error.
+    pub convert: bool,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
-        Self { verify_source: true, split: false }
+        Self { verify_source: true, split: false, convert: false }
     }
 }
 
@@ -36,6 +40,30 @@ pub struct ExtractedFile {
     pub size: u64,
     /// Files split out of it (with `split`).
     pub split: Vec<PathBuf>,
+    /// Ogg or WAV files converted from it or from WEMs split out of it (with `convert`).
+    pub converted: Vec<PathBuf>,
+    /// WEMs that couldn't be converted, and why.
+    pub not_converted: Vec<(PathBuf, ConvertError)>,
+    /// Notes on converted files (see [`crate::Converted::note`]).
+    pub convert_notes: Vec<(PathBuf, String)>,
+}
+
+impl ExtractedFile {
+    /// Convert the WEM just written to `path` (its bytes are `wem`), recording the result.
+    fn convert(&mut self, path: &Path, wem: &[u8]) -> Result<()> {
+        match convert_wem(wem) {
+            Ok(c) => {
+                let out = path.with_extension(c.extension);
+                fs::write(&out, &c.bytes).map_err(io_err(&out))?;
+                if let Some(note) = c.note {
+                    self.convert_notes.push((out.clone(), note));
+                }
+                self.converted.push(out);
+            }
+            Err(e) => self.not_converted.push((path.to_path_buf(), e)),
+        }
+        Ok(())
+    }
 }
 
 /// The bytes of one file, checked against the manifest's CRC.
@@ -75,8 +103,20 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
         .map(|((entry, bytes), splits)| {
             let path = out_dir.join(&entry.file);
             fs::write(&path, bytes).map_err(io_err(&path))?;
+            let mut done = ExtractedFile {
+                id: entry.id,
+                offset: entry.offset,
+                path: path.clone(),
+                size: bytes.len() as u64,
+                split: Vec::new(),
+                converted: Vec::new(),
+                not_converted: Vec::new(),
+                convert_notes: Vec::new(),
+            };
+            if opts.convert && entry.format == Container::Riff && entry.wwise {
+                done.convert(&path, bytes)?;
+            }
             let folder = out_dir.join(entry.file.rsplit_once('.').map_or(entry.file.as_str(), |(stem, _)| stem));
-            let mut split = Vec::with_capacity(splits.len());
             for (name, index) in splits {
                 let track = &entry.tracks[index];
                 let file = match entry.format {
@@ -91,9 +131,12 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
                     fs::create_dir_all(parent).map_err(io_err(parent))?;
                 }
                 fs::write(&path, &file).map_err(io_err(&path))?;
-                split.push(path);
+                if opts.convert && track.extension.as_deref() == Some("wem") {
+                    done.convert(&path, &file)?;
+                }
+                done.split.push(path);
             }
-            Ok(ExtractedFile { id: entry.id, offset: entry.offset, path, size: bytes.len() as u64, split })
+            Ok(done)
         })
         .collect()
 }

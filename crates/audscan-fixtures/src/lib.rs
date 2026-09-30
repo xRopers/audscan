@@ -886,3 +886,141 @@ pub fn audio_archive() -> Fixture {
     b.reject(&wav[..wav.len() / 2], "runs past the end of the file");
     b.fixture
 }
+
+// ---- Convertible WEMs -------------------------------------------------------------------
+
+/// Bits written lowest first, as Vorbis packs them (the fixtures' own writer).
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    used: u32,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, bits: u32) {
+        for i in 0..bits {
+            if self.used.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if value >> i & 1 == 1 {
+                *self.bytes.last_mut().unwrap() |= 1 << (self.used % 8);
+            }
+            self.used += 1;
+        }
+    }
+}
+
+/// A modern Wwise Vorbis WEM (vorb data inside a 0x42-byte fmt chunk, 2-byte packet
+/// headers, modified packets) with block sizes 256 and 2048. Its stripped setup header has
+/// one codebook (`codebook`, a number in the aoTuV table), one floor with no partitions,
+/// one residue, one mapping (stereo: coupling 0 with 1) and two modes, short then long.
+/// `modes` gives each audio packet's mode; the payloads are random, so the result is valid
+/// Ogg Vorbis whose headers decode but whose audio doesn't.
+pub fn wwise_vorbis_wem(channels: u16, samples: u32, codebook: u32, modes: &[u32], rng: &mut Rng) -> Vec<u8> {
+    let mut s = Bits::default();
+    s.put(0, 8); // codebooks - 1
+    s.put(codebook, 10);
+    s.put(0, 6); // floors - 1
+    s.put(0, 5); // partitions
+    s.put(1, 2); // multiplier - 1
+    s.put(8, 4); // range bits
+    s.put(0, 6); // residues - 1
+    s.put(2, 2); // type 2
+    s.put(0, 24);
+    s.put(0, 24);
+    s.put(31, 24); // begin, end, partition size - 1
+    s.put(0, 6); // classifications - 1
+    s.put(0, 8); // class book
+    s.put(0, 3);
+    s.put(0, 1); // cascade: no books
+    s.put(0, 6); // mappings - 1
+    s.put(0, 1); // no submaps
+    if channels == 2 {
+        s.put(1, 1);
+        s.put(0, 8); // one coupling step
+        s.put(0, 1);
+        s.put(1, 1); // magnitude 0, angle 1
+    } else {
+        s.put(0, 1);
+    }
+    s.put(0, 2); // reserved
+    s.put(0, 8);
+    s.put(0, 8);
+    s.put(0, 8); // submap: time, floor 0, residue 0
+    s.put(1, 6); // modes - 1
+    s.put(0, 1);
+    s.put(0, 8); // short, mapping 0
+    s.put(1, 1);
+    s.put(0, 8); // long, mapping 0
+    let setup = s.bytes;
+
+    let mut data = (setup.len() as u16).to_le_bytes().to_vec();
+    data.extend_from_slice(&setup);
+    let first_audio = data.len();
+    for &mode in modes {
+        let len = 3 + rng.below(40);
+        let mut packet = rng.bytes(len);
+        packet[0] = packet[0] & !1 | mode as u8; // one mode bit, lowest
+        data.extend_from_slice(&(packet.len() as u16).to_le_bytes());
+        data.extend(packet);
+    }
+
+    let mut vorb = vec![0u8; 0x2A];
+    vorb[0..4].copy_from_slice(&samples.to_le_bytes());
+    vorb[4..8].copy_from_slice(&0xD9u32.to_le_bytes()); // "modified packets"
+    vorb[0x14..0x18].copy_from_slice(&(first_audio as u32).to_le_bytes()); // setup at 0
+    vorb[0x24..0x28].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    vorb[0x28] = 8;
+    vorb[0x29] = 11;
+    let mut extra = 0u16.to_le_bytes().to_vec();
+    extra.extend_from_slice(&(if channels == 2 { 3u32 } else { 4 }).to_le_bytes());
+    extra.extend(vorb);
+    let fmt = fmt(false, 0xFFFF, channels, 48000, 0, 0, &extra);
+    assert_eq!(fmt.len(), 0x42);
+    riff(false, b"WAVE", &[(b"fmt ", fmt), (b"data", data)])
+}
+
+/// A Wwise Opus WEM (tag 0x3041): `packets` 20 ms CELT packets (TOC 0xF8, random payload)
+/// listed in a `seek` chunk, with the sample count and pre-skip in the fmt chunk.
+pub fn wwise_opus_wem(channels: u16, packets: usize, samples: u32, preskip: u16, rng: &mut Rng) -> Vec<u8> {
+    let (mut sizes, mut data) = (Vec::new(), Vec::new());
+    for i in 0..packets {
+        // Mostly small, a few over 255 bytes (two lacing values).
+        let len = if i % 7 == 3 { 300 } else { 3 + rng.below(60) };
+        let mut packet = rng.bytes(len);
+        packet[0] = 0xF8;
+        sizes.extend_from_slice(&(len as u16).to_le_bytes());
+        data.extend(packet);
+    }
+    let mut extra = vec![0u8; 0x12];
+    extra[0..2].copy_from_slice(&960u16.to_le_bytes());
+    extra[6..10].copy_from_slice(&samples.to_le_bytes()); // fmt+0x18
+    extra[10..14].copy_from_slice(&(packets as u32).to_le_bytes()); // fmt+0x1C
+    extra[14..16].copy_from_slice(&preskip.to_le_bytes()); // fmt+0x20
+    let fmt = fmt(false, 0x3041, channels, 48000, 0, 0, &extra);
+    riff(false, b"WAVE", &[(b"fmt ", fmt), (b"seek", sizes), (b"data", data)])
+}
+
+/// A Wwise IMA ADPCM WEM: 0x18-byte fmt, 36-byte blocks per channel.
+pub fn wwise_ima_wem(channels: u16, blocks: usize, rng: &mut Rng) -> Vec<u8> {
+    let align = 36 * channels;
+    let mut data = Vec::new();
+    for _ in 0..blocks * usize::from(channels) {
+        let mut part = rng.bytes(36);
+        part[2] = rng.below(89) as u8; // step index
+        part[3] = 0;
+        data.extend(part);
+    }
+    let extra = [16u16.to_le_bytes(), [0, 0], [0, 0]].concat(); // valid bits, channel mask
+    let fmt = fmt(false, 0x0002, channels, 48000, align, 4, &extra);
+    assert_eq!(fmt.len(), 0x18);
+    riff(false, b"WAVE", &[(b"fmt ", fmt), (b"JUNK", vec![0; 4]), (b"data", data)])
+}
+
+/// A Wwise PCM WEM: tag 0xFFFE with the short 0x18-byte fmt chunk, 16-bit.
+pub fn wwise_pcm_wem(channels: u16, frames: usize, rng: &mut Rng) -> Vec<u8> {
+    let align = 2 * channels;
+    let extra = [16u16.to_le_bytes(), [3, 0], [0, 0]].concat();
+    let fmt = fmt(false, 0xFFFE, channels, 44100, align, 16, &extra);
+    riff(false, b"WAVE", &[(b"fmt ", fmt), (b"data", rng.bytes(frames * usize::from(align)))])
+}

@@ -17,4 +17,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 audscan-fixtures.workspace = true
+# MIT or Apache-2.0; tests only (checks rebuilt Vorbis headers), not in the binaries.
+lewton = "0.10"
 tempfile.workspace = true

@@ -52,7 +52,7 @@ fn page_at(data: &[u8]) -> Result<Page<'_>, PageError> {
 
 /// Ogg's CRC-32: polynomial 0x04c11db7, not reflected, starting from 0, computed with the
 /// CRC field as zeros.
-fn crc(page: &[u8]) -> u32 {
+pub(crate) fn crc(page: &[u8]) -> u32 {
     page.iter().enumerate().fold(0u32, |crc, (i, &b)| {
         let b = if (22..26).contains(&i) { 0 } else { b };
         (crc << 8) ^ CRC_TABLE[usize::from((crc >> 24) as u8 ^ b)]
