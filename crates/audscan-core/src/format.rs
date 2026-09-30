@@ -1,5 +1,6 @@
-//! The audio-format trait: each container format (RIFF/RIFX WAVE, FSB5, Ogg) is one file
-//! under `formats/` that recognises its header and works out the whole stream's size.
+//! The audio-format trait: each container format (RIFF/RIFX WAVE, FSB5, Ogg, Wwise
+//! SoundBanks and file packages) is one file under `formats/` that recognises its header
+//! and works out the whole file's size.
 
 use std::fmt;
 use std::str::FromStr;
@@ -16,16 +17,22 @@ pub enum Container {
     Fsb5,
     /// Ogg: Vorbis, Opus, FLAC or Speex.
     Ogg,
+    /// Wwise SoundBank (`.bnk`): WEMs in its `DATA` section, listed by `DIDX`.
+    Bnk,
+    /// Wwise file package (`.pck`, `AKPK`): SoundBanks and streamed WEMs.
+    Pck,
 }
 
 impl Container {
-    pub const ALL: [Container; 3] = [Container::Riff, Container::Fsb5, Container::Ogg];
+    pub const ALL: [Container; 5] = [Container::Riff, Container::Fsb5, Container::Ogg, Container::Bnk, Container::Pck];
 
     pub fn name(self) -> &'static str {
         match self {
             Container::Riff => "riff",
             Container::Fsb5 => "fsb5",
             Container::Ogg => "ogg",
+            Container::Bnk => "bnk",
+            Container::Pck => "pck",
         }
     }
 
@@ -49,24 +56,68 @@ impl FromStr for Container {
             "riff" | "rifx" | "wav" | "wem" => Ok(Container::Riff),
             "fsb5" | "fsb" | "fmod" => Ok(Container::Fsb5),
             "ogg" => Ok(Container::Ogg),
-            _ => Err(format!("unknown audio format {s:?} (known: riff, fsb5, ogg)")),
+            "bnk" => Ok(Container::Bnk),
+            "pck" | "akpk" => Ok(Container::Pck),
+            _ => Err(format!("unknown audio format {s:?} (known: riff, fsb5, ogg, bnk, pck)")),
         }
     }
 }
 
-/// One sound in a bank (FSB5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One sound (or, in a Wwise package, one SoundBank) inside a bank or package.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
+    /// FSB5 names its sounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Wwise identifies files by number instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    /// A Wwise package's language for it (`sfx` for none), from the package's own map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// When tracks can differ (Wwise); an FSB5 bank has one codec for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
+    /// When the track is a whole file of its own (a Wwise `wem` or `bnk`), its type, so it
+    /// can be extracted alone. FSB5 tracks are raw codec data, so this is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<String>,
+    /// 0 when unknown or not audio (a SoundBank in a package).
     pub channels: u16,
     pub sample_rate: u32,
     /// Per channel.
-    pub samples: u64,
-    /// Where its data starts, from the start of the bank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u64>,
+    /// Where its data starts, from the start of the bank or package.
     pub offset: u64,
-    /// Its data, up to the next track's (padding included).
+    /// For FSB5, its data up to the next track's (padding included); for Wwise, the file.
     pub size: u64,
+    /// Like the one on [`AudioInfo`]: a Wwise bank's prefetch media say so here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Track {
+    /// Its name, or else its Wwise ID.
+    pub fn display_name(&self) -> String {
+        match (&self.name, self.id) {
+            (Some(name), _) => name.clone(),
+            (None, Some(id)) => id.to_string(),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Where `extract --split` writes it, relative to the bank's folder: `{id}.{ext}`, in a
+    /// folder named after its language unless that's `sfx`. `None` if it can't be
+    /// extracted alone.
+    pub fn split_filename(&self) -> Option<String> {
+        let (id, ext) = (self.id?, self.extension.as_deref()?);
+        let file = format!("{id}.{ext}");
+        match self.language.as_deref() {
+            Some(lang) if lang != "sfx" && crate::extract::is_safe_filename(lang) => Some(format!("{lang}/{file}")),
+            _ => Some(file),
+        }
+    }
 }
 
 /// What a header says about the audio, and so how big it is.
@@ -86,7 +137,7 @@ pub struct AudioInfo {
     pub big_endian: bool,
     /// Made by Audiokinetic Wwise, so extracted as `.wem`.
     pub wwise: bool,
-    /// A bank's sounds (FSB5); empty for other formats.
+    /// A bank's or package's contents (FSB5, BNK, PCK); empty for other formats.
     pub tracks: Vec<Track>,
     /// Something worth knowing that didn't stop it being found, like an Ogg stream with
     /// no end-of-stream page.
@@ -94,14 +145,18 @@ pub struct AudioInfo {
 }
 
 impl AudioInfo {
-    /// In seconds, when the length is known: a bank's is the total of its tracks.
+    /// In seconds, when the length is known: a bank's is the total of its audio tracks
+    /// (those with a sample rate), known only if every one's is.
     pub fn duration(&self) -> Option<f64> {
-        let seconds = |samples: u64, rate: u32| (rate > 0).then(|| samples as f64 / f64::from(rate));
+        let seconds = |samples: Option<u64>, rate: u32| (rate > 0).then_some(samples? as f64 / f64::from(rate));
         if self.tracks.is_empty() {
-            seconds(self.samples?, self.sample_rate)
-        } else {
-            self.tracks.iter().map(|t| seconds(t.samples, t.sample_rate)).sum()
+            return seconds(self.samples, self.sample_rate);
         }
+        let audio: Vec<_> = self.tracks.iter().filter(|t| t.sample_rate > 0).collect();
+        if audio.is_empty() {
+            return None;
+        }
+        audio.iter().map(|t| seconds(t.samples, t.sample_rate)).sum()
     }
 }
 
@@ -112,10 +167,13 @@ pub fn extension(container: Container, wwise: bool) -> &'static str {
         Container::Riff => "wav",
         Container::Fsb5 => "fsb",
         Container::Ogg => "ogg",
+        Container::Bnk => "bnk",
+        Container::Pck => "pck",
     }
 }
 
-/// A short label for listings: `wav`, `wem`, `fsb5` or `ogg`, with ` BE` for RIFX.
+/// A short label for listings: `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for
+/// big-endian files (RIFX, and Wwise banks and packages from big-endian consoles).
 pub fn label(container: Container, wwise: bool, big_endian: bool) -> String {
     let name = match container {
         Container::Fsb5 => "fsb5",
@@ -150,6 +208,8 @@ pub fn format_for(container: Container) -> &'static dyn AudioFormat {
         Container::Riff => &crate::formats::riff::Riff,
         Container::Fsb5 => &crate::formats::fsb5::Fsb5,
         Container::Ogg => &crate::formats::ogg::Ogg,
+        Container::Bnk => &crate::formats::bnk::Bnk,
+        Container::Pck => &crate::formats::pck::Pck,
     }
 }
 
@@ -177,6 +237,7 @@ mod tests {
         for (text, c) in [("WEM", Container::Riff), ("rifx", Container::Riff), ("fmod", Container::Fsb5), ("ogg", Container::Ogg)] {
             assert_eq!(text.parse::<Container>().unwrap(), c);
         }
+        assert_eq!("AKPK".parse::<Container>().unwrap(), Container::Pck);
         assert!("mp3".parse::<Container>().is_err());
         assert_eq!(label(Container::Riff, true, true), "wem BE");
         assert_eq!(label(Container::Fsb5, false, false), "fsb5");

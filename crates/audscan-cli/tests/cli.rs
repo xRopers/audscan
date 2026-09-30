@@ -54,7 +54,7 @@ fn scan_text_then_extract_with_manifest() {
     let out_dir = dir.path().join("out");
     let out = audscan().arg("extract").arg(&input).arg("-m").arg(&manifest).arg("-d").arg(&out_dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let extensions = ["wav", "wem", "fsb", "ogg"];
+    let extensions = ["wav", "wem", "fsb", "ogg", "bnk", "pck"];
     for e in &f.expected {
         let found: Vec<_> = extensions.iter().map(|x| out_dir.join(format!("{:08x}.{x}", e.offset))).filter(|p| p.exists()).collect();
         assert_eq!(found.len(), 1, "{:#x}", e.offset);
@@ -99,4 +99,24 @@ fn formats_filter_takes_aliases() {
     let formats: Vec<_> = json["audio"].as_array().unwrap().iter().map(|a| a["format"].as_str().unwrap().to_string()).collect();
     assert!(formats.iter().all(|f| f == "riff" || f == "fsb5"), "{formats:?}");
     assert!(formats.contains(&"fsb5".to_string()));
+}
+
+#[test]
+fn extract_split_writes_wwise_files_and_lists_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = audscan_fixtures::audio_archive();
+    let input = write_fixture(dir.path(), &f);
+    let out_dir = dir.path().join("out");
+    let out = audscan().arg("extract").arg(&input).arg("-d").arg(&out_dir).arg("--split").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // 3 + 1 from the banks, 4 + 1 from the packages.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("9 file(s) split out"), "{}", String::from_utf8_lossy(&out.stdout));
+    let pck = f.expected.iter().find(|e| e.container == "pck").unwrap();
+    assert!(out_dir.join(format!("{:08x}", pck.offset)).join("english(us)").join("100.wem").exists());
+
+    let out = audscan().args(["scan", "--tracks"]).arg(&input).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("4 files (1 bnk, 3 wem): 777, 100, 100, ..."), "{text}");
+    assert!(text.contains("100 [english(us)]"), "{text}");
+    assert!(text.contains("bnk BE"), "{text}");
 }

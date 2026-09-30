@@ -120,7 +120,7 @@ impl AudioFormat for Fsb5 {
             if offset > u64::from(sample_data) {
                 return Err(Reject::Bad(format!("track {i}'s data starts past the end of the sample data")));
             }
-            tracks.push(Track { name: None, channels, sample_rate, samples, offset: data_start + offset, size: 0 });
+            tracks.push(Track { channels, sample_rate, samples: Some(samples), offset: data_start + offset, ..Track::default() });
         }
 
         // Each track runs to the next one's data (or the end of the sample data).
@@ -149,7 +149,7 @@ impl AudioFormat for Fsb5 {
             codec: codec.to_string(),
             channels: first.channels,
             sample_rate: first.sample_rate,
-            samples: (count == 1).then_some(first.samples),
+            samples: if count == 1 { first.samples } else { None },
             big_endian: false,
             wwise: false,
             tracks,

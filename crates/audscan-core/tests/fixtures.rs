@@ -7,14 +7,25 @@ use std::path::Path;
 use audscan_core::{Container, Error, ExtractOptions, Manifest, ScanOptions, SourceInfo, audio_at, extract_all, scan};
 use audscan_fixtures::Fixture;
 
-type TrackRow = (Option<String>, u16, u32, u64);
+/// Name (or ID), language, codec, extension, channels, rate, samples, noted, and where it
+/// is (checked for Wwise files only).
+type TrackRow = (String, Option<String>, Option<String>, Option<String>, u16, u32, Option<u64>, bool, Option<(u64, u64)>);
 type Row = (u64, String, String, u64, String, u16, u32, Option<u64>, Vec<TrackRow>, bool, u32);
 
 fn expected_rows(f: &Fixture) -> Vec<Row> {
     f.expected
         .iter()
         .map(|e| {
-            let tracks = e.tracks.iter().map(|&(name, ch, rate, samples)| (name.map(String::from), ch, rate, samples)).collect();
+            let tracks = e
+                .tracks
+                .iter()
+                .map(|t| {
+                    let text = |s: Option<&str>| s.map(String::from);
+                    let range = t.range.map(|(offset, size)| (offset as u64, size as u64));
+                    let (lang, codec, ext) = (text(t.language), text(t.codec), text(t.extension));
+                    (t.name.clone(), lang, codec, ext, t.channels, t.sample_rate, t.samples, t.noted, range)
+                })
+                .collect();
             let (container, label, codec) = (e.container.to_string(), e.label.to_string(), e.codec.to_string());
             (e.offset as u64, container, label, e.size as u64, codec, e.channels, e.sample_rate, e.samples, tracks, e.noted, e.crc32)
         })
@@ -27,7 +38,15 @@ fn found_rows(data: &[u8]) -> Vec<Row> {
         .iter()
         .map(|a| {
             let i = &a.info;
-            let tracks = i.tracks.iter().map(|t| (t.name.clone(), t.channels, t.sample_rate, t.samples)).collect();
+            let tracks = i
+                .tracks
+                .iter()
+                .map(|t| {
+                    let range = t.extension.is_some().then_some((t.offset, t.size));
+                    let (lang, codec, ext) = (t.language.clone(), t.codec.clone(), t.extension.clone());
+                    (t.display_name(), lang, codec, ext, t.channels, t.sample_rate, t.samples, t.note.is_some(), range)
+                })
+                .collect();
             let (container, codec) = (a.container.to_string(), i.codec.clone());
             (a.offset, container, a.label(), i.size, codec, i.channels, i.sample_rate, i.samples, tracks, i.note.is_some(), a.crc32)
         })
@@ -125,8 +144,68 @@ fn extract_refuses_a_different_input() {
     let err = extract_all(&changed, &manifest, dir.path(), &ExtractOptions::default()).unwrap_err();
     assert!(matches!(err, Error::SourceMismatch(_)), "{err}");
     // Forcing past the file check still catches the changed audio.
-    let err = extract_all(&changed, &manifest, dir.path(), &ExtractOptions { verify_source: false }).unwrap_err();
+    let err = extract_all(&changed, &manifest, dir.path(), &ExtractOptions { verify_source: false, ..Default::default() }).unwrap_err();
     assert!(matches!(err, Error::Audio { id: 0, .. }), "{err}");
+}
+
+#[test]
+fn split_writes_each_wwise_file_by_id_and_language() {
+    let f = audscan_fixtures::audio_archive();
+    let found = scan(&f.data, &ScanOptions::default()).audio;
+    let manifest = Manifest::new(SourceInfo::describe(Path::new(f.name), &f.data), ScanOptions::default(), &found);
+    let dir = tempfile::tempdir().unwrap();
+    let files = extract_all(&f.data, &manifest, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap();
+
+    let i = f.expected.iter().position(|e| e.container == "pck").unwrap();
+    let (e, file) = (&f.expected[i], &files[i]);
+    let folder = dir.path().join(format!("{:08x}", e.offset));
+    let names: Vec<_> = file.split.iter().map(|p| p.strip_prefix(&folder).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    // Same ID, different languages: the localized one goes in its language's folder.
+    assert_eq!(names, ["777.bnk", "100.wem", "english(us)/100.wem", "4294967297.wem"]);
+    for (path, t) in file.split.iter().zip(&e.tracks) {
+        let (offset, size) = t.range.unwrap();
+        assert_eq!(fs::read(path).unwrap(), &f.data[e.offset + offset..][..size]);
+    }
+    // A SoundBank split out of a package is a bank of its own.
+    let bank = fs::read(&file.split[0]).unwrap();
+    let alone = scan(&bank, &ScanOptions::default()).audio;
+    assert_eq!((alone.len(), alone[0].container, alone[0].info.size), (1, Container::Bnk, bank.len() as u64));
+
+    // Prefetch media come out as they are in the bank: the start of the WEM.
+    let i = f.expected.iter().position(|e| e.codec == "mixed").unwrap();
+    assert_eq!(files[i].split.len(), 3);
+    assert_eq!(fs::read(&files[i].split[2]).unwrap().len(), 600);
+    // FSB5 tracks are raw codec data, not files: nothing is split out.
+    let i = f.expected.iter().position(|e| e.container == "fsb5").unwrap();
+    assert!(files[i].split.is_empty());
+    // Without split, nothing is.
+    let plain = extract_all(&f.data, &manifest, &dir.path().join("plain"), &ExtractOptions::default()).unwrap();
+    assert!(plain.iter().all(|f| f.split.is_empty()));
+}
+
+#[test]
+fn a_manifest_cannot_split_outside_the_folder() {
+    let f = audscan_fixtures::audio_archive();
+    let found = scan(&f.data, &ScanOptions::default()).audio;
+    let manifest = Manifest::new(SourceInfo::describe(Path::new(f.name), &f.data), ScanOptions::default(), &found);
+    let pck = manifest.audio.iter().position(|a| a.format == Container::Pck).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    for evil in ["wem/../../evil", "..", "a\\b"] {
+        let mut m = manifest.clone();
+        m.audio[pck].tracks[1].extension = Some(evil.into());
+        let err = extract_all(&f.data, &m, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap_err();
+        assert!(matches!(err, Error::BadFilename(_)), "{evil}: {err}");
+    }
+    // A language that isn't a plain name is left out of the path, not followed.
+    let mut m = manifest.clone();
+    m.audio[pck].tracks[2].language = Some("../..".into());
+    let files = extract_all(&f.data, &m, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap();
+    assert!(files[pck].split.iter().all(|p| p.starts_with(dir.path().join(m.audio[pck].file.replace(".pck", "")))));
+    // A track outside its bank is refused.
+    let mut m = manifest.clone();
+    m.audio[pck].tracks[1].size = m.audio[pck].size;
+    let err = extract_all(&f.data, &m, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap_err();
+    assert!(matches!(err, Error::Audio { .. }), "{err}");
 }
 
 /// The generated files in `tests/fixtures` must match what the builder makes now.

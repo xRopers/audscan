@@ -17,8 +17,18 @@ fn main() -> std::io::Result<()> {
                 let tracks: Vec<_> = e
                     .tracks
                     .iter()
-                    .map(|(name, channels, rate, samples)| {
-                        json!({ "name": name, "channels": channels, "sample_rate": rate, "samples": samples })
+                    .map(|t| {
+                        json!({
+                            "name": t.name,
+                            "language": t.language,
+                            "codec": t.codec,
+                            "extension": t.extension,
+                            "channels": t.channels,
+                            "sample_rate": t.sample_rate,
+                            "samples": t.samples,
+                            "noted": t.noted,
+                            "range": t.range,
+                        })
                     })
                     .collect();
                 json!({

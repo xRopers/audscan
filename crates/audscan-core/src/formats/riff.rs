@@ -44,94 +44,115 @@ impl AudioFormat for Riff {
     }
 
     fn parse(&self, data: &[u8]) -> Result<AudioInfo, Reject> {
-        if data.len() < 12 || !matches!(&data[8..12], b"WAVE" | b"XWMA") {
-            return Err(Reject::NoMatch);
-        }
-        let r = Reader { data, big_endian: data[3] == b'X' };
-        let declared = u64::from(r.u32(4));
-        if declared < 4 {
-            return Err(Reject::Bad(format!("the RIFF size is {declared}")));
-        }
-        let declared_size = 8 + declared;
-        if declared_size > data.len() as u64 {
-            return Err(Reject::Bad(format!("runs past the end of the file ({declared_size} bytes declared, {} left)", data.len())));
-        }
-        let mut end = declared_size as usize;
-        let mut note = None;
-
-        let mut chunks = Chunks::default();
-        let mut pos = 12;
-        while pos + 8 <= end {
-            let id: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
-            let body = pos + 8;
-            let body_end = body.saturating_add(r.u32(pos + 4) as usize);
-            if body_end > end {
-                // Some writers get the RIFF size wrong (Unreal's test WAVs count a 20-byte
-                // fmt chunk as 16), but a data chunk that still fits shows the real end.
-                if &id == b"data" && body_end <= data.len() {
-                    note = Some(format!("the RIFF header says {declared_size} bytes; the data chunk runs to {body_end}"));
-                    end = body_end;
-                } else {
-                    let id = id.escape_ascii().to_string();
-                    return Err(Reject::Bad(format!("the {id:?} chunk runs past the end of the RIFF data")));
-                }
-            }
-            let range = Some(body..body_end);
-            match &id {
-                b"fmt " => chunks.fmt = chunks.fmt.or(range),
-                b"data" => chunks.data = chunks.data.or(range),
-                b"fact" => chunks.fact = chunks.fact.or(range),
-                b"vorb" => chunks.vorb = chunks.vorb.or(range),
-                b"akd " => chunks.akd = true,
-                _ => {}
-            }
-            // Chunks are padded to an even length.
-            pos = body_end + (body_end - body) % 2;
-        }
-
-        let fmt = chunks.fmt.ok_or_else(|| Reject::Bad("no fmt chunk".into()))?;
-        let data_chunk = chunks.data.ok_or_else(|| Reject::Bad("no data chunk".into()))?;
-        if fmt.len() < 14 {
-            return Err(Reject::Bad(format!("the fmt chunk is only {} bytes", fmt.len())));
-        }
-        let f = fmt.start;
-        let mut tag = r.u16(f);
-        let (channels, sample_rate, block_align) = (r.u16(f + 2), r.u32(f + 4), r.u16(f + 12));
-        let bits = if fmt.len() >= 16 { r.u16(f + 14) } else { 0 };
-        // WAVE_FORMAT_EXTENSIBLE: the real tag starts the subformat GUID.
-        if tag == 0xFFFE && fmt.len() >= 40 {
-            tag = r.u16(f + 24);
-        }
-        if channels == 0 || sample_rate == 0 {
-            return Err(Reject::Bad(format!("the fmt chunk says {channels} channels at {sample_rate} Hz")));
-        }
-        let wwise = WWISE_CODECS.contains(&tag) || chunks.akd || r.big_endian;
-
-        let data_len = data_chunk.len() as u64;
-        let samples = match tag {
-            // PCM, float, A-law, mu-law: fixed-size frames.
-            0x0001 | 0x0003 | 0x0006 | 0x0007 if block_align > 0 => Some(data_len / u64::from(block_align)),
-            // Wwise Vorbis keeps the count first in its `vorb` data: its own chunk, or
-            // inside a 0x42-byte fmt chunk from 0x18 (Wwise 2012 and later).
-            0xFFFF => {
-                let vorb = chunks.vorb.filter(|v| v.len() >= 4).map(|v| v.start);
-                vorb.or((fmt.len() >= 0x42).then_some(f + 0x18)).map(|p| u64::from(r.u32(p)))
-            }
-            _ => chunks.fact.filter(|c| c.len() >= 4).map(|c| u64::from(r.u32(c.start))),
-        };
-
-        Ok(AudioInfo {
-            size: end as u64,
-            codec: codec_name(tag, bits, wwise),
-            channels,
-            sample_rate,
-            samples,
-            big_endian: r.big_endian,
-            wwise,
-            tracks: Vec::new(),
-            note,
-        })
+        parse_wave(data, false)
     }
+}
+
+/// Read a WAVE header whose file may be cut short: Wwise banks keep only the start of a
+/// streamed WEM ("prefetch" media) and stream the rest. The size is what's there, the
+/// details (and the length) come from the header, and the note says it's partial.
+pub(crate) fn parse_prefix(data: &[u8]) -> Result<AudioInfo, Reject> {
+    parse_wave(data, true)
+}
+
+fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
+    if data.len() < 12 || !matches!(&data[8..12], b"WAVE" | b"XWMA") {
+        return Err(Reject::NoMatch);
+    }
+    let r = Reader { data, big_endian: data[3] == b'X' };
+    let declared = u64::from(r.u32(4));
+    if declared < 4 {
+        return Err(Reject::Bad(format!("the RIFF size is {declared}")));
+    }
+    let declared_size = 8 + declared;
+    let mut note = None;
+    let mut end = if declared_size <= data.len() as u64 {
+        declared_size as usize
+    } else if prefix {
+        note = Some(format!("prefetch: the first {} of {declared_size} bytes (the rest is streamed)", data.len()));
+        data.len()
+    } else {
+        return Err(Reject::Bad(format!("runs past the end of the file ({declared_size} bytes declared, {} left)", data.len())));
+    };
+
+    let mut chunks = Chunks::default();
+    let mut pos = 12;
+    while pos + 8 <= end {
+        let id: [u8; 4] = data[pos..pos + 4].try_into().unwrap();
+        let body = pos + 8;
+        let len = r.u32(pos + 4);
+        let mut body_end = body.saturating_add(len as usize);
+        if body_end > end {
+            // Some writers get the RIFF size wrong (Unreal's test WAVs count a 20-byte
+            // fmt chunk as 16), but a data chunk that still fits shows the real end.
+            if &id == b"data" && body_end <= data.len() {
+                note = Some(format!("the RIFF header says {declared_size} bytes; the data chunk runs to {body_end}"));
+                end = body_end;
+            } else if prefix && data.len() < declared_size as usize {
+                body_end = end;
+            } else {
+                let id = id.escape_ascii().to_string();
+                return Err(Reject::Bad(format!("the {id:?} chunk runs past the end of the RIFF data")));
+            }
+        }
+        let range = Some(body..body_end);
+        match &id {
+            b"fmt " => chunks.fmt = chunks.fmt.or(range),
+            b"data" if chunks.data.is_none() => (chunks.data, chunks.data_len) = (range, u64::from(len)),
+            b"fact" => chunks.fact = chunks.fact.or(range),
+            b"vorb" => chunks.vorb = chunks.vorb.or(range),
+            b"akd " => chunks.akd = true,
+            _ => {}
+        }
+        // Chunks are padded to an even length.
+        pos = body_end + (body_end - body) % 2;
+    }
+
+    let fmt = chunks.fmt.ok_or_else(|| Reject::Bad("no fmt chunk".into()))?;
+    if chunks.data.is_none() {
+        return Err(Reject::Bad("no data chunk".into()));
+    }
+    if fmt.len() < 14 {
+        return Err(Reject::Bad(format!("the fmt chunk is only {} bytes", fmt.len())));
+    }
+    let f = fmt.start;
+    let mut tag = r.u16(f);
+    let (channels, sample_rate, block_align) = (r.u16(f + 2), r.u32(f + 4), r.u16(f + 12));
+    let bits = if fmt.len() >= 16 { r.u16(f + 14) } else { 0 };
+    // WAVE_FORMAT_EXTENSIBLE: the real tag starts the subformat GUID.
+    if tag == 0xFFFE && fmt.len() >= 40 {
+        tag = r.u16(f + 24);
+    }
+    if channels == 0 || sample_rate == 0 {
+        return Err(Reject::Bad(format!("the fmt chunk says {channels} channels at {sample_rate} Hz")));
+    }
+    let wwise = WWISE_CODECS.contains(&tag) || chunks.akd || r.big_endian;
+
+    // As declared: prefetch media hold only the start of it.
+    let data_len = chunks.data_len;
+    let samples = match tag {
+        // PCM, float, A-law, mu-law: fixed-size frames.
+        0x0001 | 0x0003 | 0x0006 | 0x0007 if block_align > 0 => Some(data_len / u64::from(block_align)),
+        // Wwise Vorbis keeps the count first in its `vorb` data: its own chunk, or
+        // inside a 0x42-byte fmt chunk from 0x18 (Wwise 2012 and later).
+        0xFFFF => {
+            let vorb = chunks.vorb.filter(|v| v.len() >= 4).map(|v| v.start);
+            vorb.or((fmt.len() >= 0x42).then_some(f + 0x18)).map(|p| u64::from(r.u32(p)))
+        }
+        _ => chunks.fact.filter(|c| c.len() >= 4).map(|c| u64::from(r.u32(c.start))),
+    };
+
+    Ok(AudioInfo {
+        size: end as u64,
+        codec: codec_name(tag, bits, wwise),
+        channels,
+        sample_rate,
+        samples,
+        big_endian: r.big_endian,
+        wwise,
+        tracks: Vec::new(),
+        note,
+    })
 }
 
 /// The chunks that matter, by where their bodies are (the first of each kind).
@@ -139,6 +160,7 @@ impl AudioFormat for Riff {
 struct Chunks {
     fmt: Option<Range<usize>>,
     data: Option<Range<usize>>,
+    data_len: u64,
     fact: Option<Range<usize>>,
     vorb: Option<Range<usize>>,
     akd: bool,
@@ -226,6 +248,17 @@ mod tests {
         // Past the end of the input it's still an error.
         let err = Riff.parse(&file[..true_size - 1]).unwrap_err();
         assert!(matches!(err, Reject::Bad(r) if r.contains("\"data\" chunk runs past")));
+    }
+
+    #[test]
+    fn prefetch_media_are_read_from_their_header() {
+        let file = wave(&[(b"fmt ", &PCM16_MONO), (b"data", &[0; 1000])]);
+        assert!(matches!(Riff.parse(&file[..100]), Err(Reject::Bad(_))));
+        let info = parse_prefix(&file[..100]).unwrap();
+        assert_eq!((info.size, info.samples), (100, Some(500)));
+        assert!(info.note.unwrap().starts_with("prefetch: the first 100 of"));
+        // A whole file reads the same either way.
+        assert_eq!(parse_prefix(&file), Riff.parse(&file));
     }
 
     #[test]

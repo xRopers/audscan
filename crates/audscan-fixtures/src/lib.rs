@@ -33,19 +33,46 @@ impl Rng {
 pub struct Expected {
     pub offset: usize,
     pub size: usize,
-    /// `riff`, `fsb5` or `ogg`.
+    /// `riff`, `fsb5`, `ogg`, `bnk` or `pck`.
     pub container: &'static str,
-    /// `wav`, `wem`, `fsb5` or `ogg`, with ` BE` for RIFX.
+    /// `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
     pub label: &'static str,
     pub codec: &'static str,
     pub channels: u16,
     pub sample_rate: u32,
     pub samples: Option<u64>,
-    /// A bank's tracks: name, channels, sample rate, samples.
-    pub tracks: Vec<(Option<&'static str>, u16, u32, u64)>,
+    /// A bank's or package's contents.
+    pub tracks: Vec<ExpectedTrack>,
     /// Whether the scanner should attach a note (an Ogg stream with no EOS page).
     pub noted: bool,
     pub crc32: u32,
+}
+
+/// One sound (or SoundBank) inside a bank or package.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpectedTrack {
+    /// FSB5's name, or the Wwise ID in decimal.
+    pub name: String,
+    pub language: Option<&'static str>,
+    /// Per track for Wwise; `None` for FSB5.
+    pub codec: Option<&'static str>,
+    /// `wem` or `bnk` for Wwise; `None` for FSB5.
+    pub extension: Option<&'static str>,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples: Option<u64>,
+    /// Prefetch media (the start of a streamed WEM): noted.
+    pub noted: bool,
+    /// Where it is from the start of the bank or package, and its size (Wwise only: the
+    /// FSB5 tests check those separately).
+    pub range: Option<(usize, usize)>,
+}
+
+impl ExpectedTrack {
+    pub fn fsb(name: Option<&str>, channels: u16, sample_rate: u32, samples: u64) -> Self {
+        let name = name.unwrap_or("").to_string();
+        Self { name, language: None, codec: None, extension: None, channels, sample_rate, samples: Some(samples), noted: false, range: None }
+    }
 }
 
 /// A header the scanner should report as unusable.
@@ -71,7 +98,7 @@ pub struct Meta {
     pub channels: u16,
     pub sample_rate: u32,
     pub samples: Option<u64>,
-    pub tracks: Vec<(Option<&'static str>, u16, u32, u64)>,
+    pub tracks: Vec<ExpectedTrack>,
     pub noted: bool,
 }
 
@@ -322,6 +349,144 @@ pub fn flac_head(channels: u8, rate: u32, total_samples: u64) -> Vec<u8> {
     p
 }
 
+// ---- Wwise ----------------------------------------------------------------------------
+
+/// A Wwise Vorbis WEM (sample count inside a 0x42-byte fmt chunk).
+pub fn vorbis_wem(big: bool, channels: u16, rate: u32, samples: u32, data_len: usize, rng: &mut Rng) -> Vec<u8> {
+    let mut extra = vec![0u8; 48];
+    extra[6..10].copy_from_slice(&u32_bytes(samples, big));
+    riff(big, b"WAVE", &[(b"fmt ", fmt(big, 0xFFFF, channels, rate, 0, 0, &extra)), (b"data", rng.bytes(data_len))])
+}
+
+/// A 16-bit PCM WEM, marked as Wwise's by an `akd ` chunk.
+pub fn pcm_wem(channels: u16, rate: u32, frames: usize, rng: &mut Rng) -> Vec<u8> {
+    let align = channels * 2;
+    riff(false, b"WAVE", &[
+        (b"fmt ", fmt(false, 1, channels, rate, align, 16, &[])),
+        (b"akd ", rng.bytes(16)),
+        (b"data", rng.bytes(frames * align as usize)),
+    ])
+}
+
+fn section(tag: &[u8; 4], body: &[u8], big: bool) -> Vec<u8> {
+    let mut out = tag.to_vec();
+    out.extend_from_slice(&u32_bytes(body.len() as u32, big));
+    out.extend_from_slice(body);
+    out
+}
+
+/// A SoundBank: BKHD (version, bank ID, padding: 16 bytes), then DIDX and DATA for
+/// `media` (ID and bytes, each 16-byte aligned in DATA) if there are any, then HIRC.
+/// Returns the bank and where each medium landed in it.
+pub fn bnk(big: bool, version: u32, media: &[(u32, Vec<u8>)], rng: &mut Rng) -> (Vec<u8>, Vec<usize>) {
+    let mut header = u32_bytes(version, big).to_vec();
+    header.extend_from_slice(&u32_bytes(0xB00C_0000 | version, big));
+    header.extend_from_slice(&[0; 8]);
+    let mut out = section(b"BKHD", &header, big);
+    let mut places = Vec::new();
+    if !media.is_empty() {
+        let (mut index, mut data) = (Vec::new(), Vec::new());
+        for (id, bytes) in media {
+            while !data.len().is_multiple_of(16) {
+                data.push(0);
+            }
+            for v in [*id, data.len() as u32, bytes.len() as u32] {
+                index.extend_from_slice(&u32_bytes(v, big));
+            }
+            places.push(data.len());
+            data.extend_from_slice(bytes);
+        }
+        out.extend(section(b"DIDX", &index, big));
+        let data_start = out.len() + 8;
+        out.extend(section(b"DATA", &data, big));
+        places.iter_mut().for_each(|p| *p += data_start);
+    }
+    out.extend(section(b"HIRC", &rng.bytes(30), big));
+    (out, places)
+}
+
+/// One file in a package's lookup table.
+pub struct PckFile {
+    pub id: u64,
+    pub language: u32,
+    pub bytes: Vec<u8>,
+}
+
+/// A little-endian AKPK package: a language map (UTF-16 names), lookup tables for banks,
+/// streams and (if `externals` is `Some`) external files with 64-bit IDs, then the files
+/// at multiples of `block`. Returns it and each file's offset, in table order.
+pub fn pck(languages: &[(u32, &str)], banks: &[PckFile], streams: &[PckFile], externals: Option<&[PckFile]>, block: u32) -> (Vec<u8>, Vec<usize>) {
+    let mut map = (languages.len() as u32).to_le_bytes().to_vec();
+    let mut strings = Vec::new();
+    for (id, name) in languages {
+        map.extend_from_slice(&((4 + 8 * languages.len() + strings.len()) as u32).to_le_bytes());
+        map.extend_from_slice(&id.to_le_bytes());
+        strings.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    }
+    map.extend(strings);
+    while !map.len().is_multiple_of(4) {
+        map.push(0);
+    }
+    let mut tables: Vec<(&[PckFile], bool)> = vec![(banks, false), (streams, false)];
+    tables.extend(externals.map(|e| (e, true)));
+    let table_size = |files: &[PckFile], wide: bool| 4 + files.len() * if wide { 24 } else { 20 };
+    let fields = 16 + if externals.is_some() { 4 } else { 0 };
+    let header_size = fields + map.len() + tables.iter().map(|&(f, w)| table_size(f, w)).sum::<usize>();
+
+    let all: Vec<&PckFile> = tables.iter().flat_map(|(files, _)| files.iter()).collect();
+    let mut offsets = Vec::new();
+    let mut at = 8 + header_size;
+    for f in &all {
+        at = at.div_ceil(block as usize) * block as usize;
+        offsets.push(at);
+        at += f.bytes.len();
+    }
+
+    let mut out = b"AKPK".to_vec();
+    out.extend_from_slice(&(header_size as u32).to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&(map.len() as u32).to_le_bytes());
+    for &(files, wide) in &tables {
+        out.extend_from_slice(&(table_size(files, wide) as u32).to_le_bytes());
+    }
+    out.extend(map);
+    let mut next = offsets.iter();
+    for &(files, wide) in &tables {
+        out.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        for f in files {
+            if wide {
+                out.extend_from_slice(&f.id.to_le_bytes());
+            } else {
+                out.extend_from_slice(&(f.id as u32).to_le_bytes());
+            }
+            let offset = *next.next().unwrap();
+            for v in [block, f.bytes.len() as u32, offset as u32 / block, f.language] {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+    assert_eq!(out.len(), 8 + header_size);
+    for (f, &offset) in all.iter().zip(&offsets) {
+        out.resize(offset, 0);
+        out.extend_from_slice(&f.bytes);
+    }
+    (out, offsets)
+}
+
+fn wem_track(id: u64, codec: &'static str, channels: u16, rate: u32, samples: Option<u64>, range: (usize, usize)) -> ExpectedTrack {
+    ExpectedTrack {
+        name: id.to_string(),
+        language: None,
+        codec: Some(codec),
+        extension: Some("wem"),
+        channels,
+        sample_rate: rate,
+        samples,
+        noted: false,
+        range: Some(range),
+    }
+}
+
 // ---- Fixtures -------------------------------------------------------------------------
 
 pub fn all() -> Vec<Fixture> {
@@ -341,7 +506,7 @@ pub fn audio_archive() -> Fixture {
     let mut b = Builder::new("audio_archive", "WAV, WEM (RIFF and RIFX), FSB5 (also inside a .bank), Ogg Vorbis/Opus/FLAC, chained and multiplexed Ogg, and traps", 1);
 
     // Magic bytes in text: none of these is followed by a real header.
-    b.raw(b"notes: RIFF files, OggS pages and FSB5 banks live here\n");
+    b.raw(b"notes: RIFF files, OggS pages and FSB5 banks live here, BKHD sections and AKPK packages too\n");
     b.gap();
 
     // Plain 16-bit stereo WAV with an odd-sized chunk after the data.
@@ -410,7 +575,7 @@ pub fn audio_archive() -> Fixture {
     assert_eq!(&bank[at..at + 4], b"FSB5");
     b.raw(&bank[..at]);
     let mut m = Meta::new("fsb5", "fsb5", "Vorbis", 2, 44100, None);
-    m.tracks = tracks.iter().map(|t| (t.name, t.channels, t.rate, t.samples)).collect();
+    m.tracks = tracks.iter().map(|t| ExpectedTrack::fsb(t.name, t.channels, t.rate, t.samples)).collect();
     b.audio(&fsb, m);
     b.raw(&bank[at + fsb.len()..]);
     b.gap();
@@ -418,7 +583,7 @@ pub fn audio_archive() -> Fixture {
     // Version 0 FSB5 (0x40-byte header), one unnamed PCM track.
     let fsb = fsb5(0, 2, &[FsbTrack { name: None, channels: 1, rate: 22050, samples: 500, data_len: 1000 }], &mut b.rng);
     let mut m = Meta::new("fsb5", "fsb5", "PCM 16-bit", 1, 22050, Some(500));
-    m.tracks = vec![(None, 1, 22050, 500)];
+    m.tracks = vec![ExpectedTrack::fsb(None, 1, 22050, 500)];
     b.audio(&fsb, m);
     b.gap();
 
@@ -477,6 +642,80 @@ pub fn audio_archive() -> Fixture {
     b.audio(&wav, m);
     b.gap();
 
+    // A SoundBank with a PCM WEM, a Wwise Vorbis WEM and prefetch media: the first 600
+    // bytes of a streamed WEM whose header says it's much longer.
+    let pcm = pcm_wem(1, 48000, 200, &mut b.rng);
+    let vorbis = vorbis_wem(false, 2, 44100, 88200, 700, &mut b.rng);
+    let mut prefetch = vorbis_wem(false, 2, 48000, 960_000, 20_000, &mut b.rng);
+    prefetch.truncate(600);
+    let media = [(111, pcm.clone()), (222, vorbis.clone()), (333, prefetch)];
+    let (bank, at) = bnk(false, 0x88, &media, &mut b.rng);
+    let mut m = Meta::new("bnk", "bnk", "mixed", 1, 48000, None);
+    m.tracks = vec![
+        wem_track(111, "PCM 16-bit", 1, 48000, Some(200), (at[0], pcm.len())),
+        wem_track(222, "Wwise Vorbis", 2, 44100, Some(88200), (at[1], vorbis.len())),
+        ExpectedTrack { noted: true, ..wem_track(333, "Wwise Vorbis", 2, 48000, Some(960_000), (at[2], 600)) },
+    ];
+    b.audio(&bank, m);
+    b.gap();
+
+    // A big-endian bank (an older console) holding a RIFX WEM.
+    let wem = vorbis_wem(true, 1, 32000, 64000, 300, &mut b.rng);
+    let (bank, at) = bnk(true, 0x30, &[(0xABCD, wem.clone())], &mut b.rng);
+    let mut m = Meta::new("bnk", "bnk BE", "Wwise Vorbis", 1, 32000, Some(64000));
+    m.tracks = vec![wem_track(0xABCD, "Wwise Vorbis", 1, 32000, Some(64000), (at[0], wem.len()))];
+    b.audio(&bank, m);
+    b.gap();
+
+    // A bank of events only, no media.
+    let (bank, _) = bnk(false, 0x86, &[], &mut b.rng);
+    b.audio(&bank, Meta::new("bnk", "bnk", "no media", 0, 0, None));
+    b.gap();
+
+    // A package with a SoundBank, two streams with the same ID in different languages,
+    // and an external file with a 64-bit ID.
+    let (inner, _) = bnk(false, 0x88, &[(5, pcm_wem(1, 22050, 50, &mut b.rng))], &mut b.rng);
+    let streams = [
+        PckFile { id: 100, language: 0, bytes: vorbis_wem(false, 2, 48000, 48000, 400, &mut b.rng) },
+        PckFile { id: 100, language: 1, bytes: vorbis_wem(false, 1, 48000, 24000, 200, &mut b.rng) },
+    ];
+    let externals = [PckFile { id: 0x1_0000_0001, language: 0, bytes: vorbis_wem(false, 2, 44100, 44100, 250, &mut b.rng) }];
+    let banks = [PckFile { id: 777, language: 0, bytes: inner.clone() }];
+    let (package, at) = pck(&[(0, "sfx"), (1, "english(us)")], &banks, &streams, Some(&externals), 16);
+    let mut m = Meta::new("pck", "pck", "Wwise Vorbis", 2, 48000, None);
+    m.tracks = vec![
+        ExpectedTrack {
+            name: "777".into(),
+            language: Some("sfx"),
+            codec: Some("SoundBank"),
+            extension: Some("bnk"),
+            channels: 0,
+            sample_rate: 0,
+            samples: None,
+            noted: false,
+            range: Some((at[0], inner.len())),
+        },
+        ExpectedTrack { language: Some("sfx"), ..wem_track(100, "Wwise Vorbis", 2, 48000, Some(48000), (at[1], streams[0].bytes.len())) },
+        ExpectedTrack {
+            language: Some("english(us)"),
+            ..wem_track(100, "Wwise Vorbis", 1, 48000, Some(24000), (at[2], streams[1].bytes.len()))
+        },
+        ExpectedTrack {
+            language: Some("sfx"),
+            ..wem_track(0x1_0000_0001, "Wwise Vorbis", 2, 44100, Some(44100), (at[3], externals[0].bytes.len()))
+        },
+    ];
+    b.audio(&package, m);
+    b.gap();
+
+    // An older package: no external table, 2 KiB blocks.
+    let stream = [PckFile { id: 9, language: 0, bytes: pcm_wem(2, 44100, 100, &mut b.rng) }];
+    let (package, at) = pck(&[(0, "sfx")], &[], &stream, None, 2048);
+    let mut m = Meta::new("pck", "pck", "PCM 16-bit", 2, 44100, Some(100));
+    m.tracks = vec![ExpectedTrack { language: Some("sfx"), ..wem_track(9, "PCM 16-bit", 2, 44100, Some(100), (at[0], stream[0].bytes.len())) }];
+    b.audio(&package, m);
+    b.gap();
+
     // Traps. Not audio: an AVI, and an Ogg page from the middle of a stream.
     b.raw(&riff(false, b"AVI ", &[(b"avih", vec![0; 56])]));
     b.gap();
@@ -489,6 +728,21 @@ pub fn audio_archive() -> Fixture {
     b.gap();
     let bad = fsb5(1, 99, &[FsbTrack { name: None, channels: 1, rate: 8000, samples: 10, data_len: 32 }], &mut b.rng);
     b.reject(&bad, "unknown codec 99");
+    b.gap();
+    // A bank whose index says its medium is bigger than DATA: the first DIDX entry's size
+    // is at 16 (BKHD) + 8 (its section header) + 8 (DIDX's) + 8 (ID, offset).
+    let (mut bank, _) = bnk(false, 0x88, &[(1, b.rng.bytes(64))], &mut b.rng);
+    assert_eq!(bank[40..44], 64u32.to_le_bytes());
+    bank[40..44].copy_from_slice(&4096u32.to_le_bytes());
+    b.reject(&bank, "media 1 runs past the end of the DATA section");
+    b.gap();
+    // A package whose only file starts far past the end of the input: its start block is at
+    // 24 (fixed fields) + 20 (map) + 4 (empty bank table) + 4 (count) + 12.
+    let stream = [PckFile { id: 9, language: 0, bytes: b.rng.bytes(40) }];
+    let (mut package, at) = pck(&[(0, "sfx")], &[], &stream, None, 16);
+    assert_eq!(package[64..68], (at[0] as u32 / 16).to_le_bytes());
+    package[64..68].copy_from_slice(&0x0100_0000u32.to_le_bytes());
+    b.reject(&package, "file 9 runs past the end of the input");
     b.gap();
     let mut page = ogg_page(BOS, 0, 0x8888, 0, &vorbis_head(1, 8000));
     page[30] ^= 0xFF;

@@ -7,7 +7,7 @@
       "format": "riff",
       "label": "wav",
       "noted": false,
-      "offset": 116,
+      "offset": 153,
       "sample_rate": 44100,
       "samples": 1000,
       "size": 4074,
@@ -20,7 +20,7 @@
       "format": "riff",
       "label": "wem BE",
       "noted": false,
-      "offset": 4235,
+      "offset": 4272,
       "sample_rate": 48000,
       "samples": 480000,
       "size": 3094,
@@ -33,7 +33,7 @@
       "format": "riff",
       "label": "wem",
       "noted": false,
-      "offset": 7360,
+      "offset": 7397,
       "sample_rate": 32000,
       "samples": 96000,
       "size": 1602,
@@ -46,7 +46,7 @@
       "format": "riff",
       "label": "wem",
       "noted": false,
-      "offset": 9021,
+      "offset": 9058,
       "sample_rate": 48000,
       "samples": 300,
       "size": 668,
@@ -59,7 +59,7 @@
       "format": "riff",
       "label": "wav",
       "noted": false,
-      "offset": 9716,
+      "offset": 9753,
       "sample_rate": 22050,
       "samples": 1234,
       "size": 602,
@@ -72,7 +72,7 @@
       "format": "riff",
       "label": "wav",
       "noted": false,
-      "offset": 10347,
+      "offset": 10384,
       "sample_rate": 48000,
       "samples": 100,
       "size": 2468,
@@ -85,26 +85,41 @@
       "format": "fsb5",
       "label": "fsb5",
       "noted": false,
-      "offset": 12902,
+      "offset": 12939,
       "sample_rate": 44100,
       "samples": null,
       "size": 1450,
       "tracks": [
         {
           "channels": 2,
+          "codec": null,
+          "extension": null,
+          "language": null,
           "name": "music_intro",
+          "noted": false,
+          "range": null,
           "sample_rate": 44100,
           "samples": 441000
         },
         {
           "channels": 1,
+          "codec": null,
+          "extension": null,
+          "language": null,
           "name": "vo_line_01",
+          "noted": false,
+          "range": null,
           "sample_rate": 24000,
           "samples": 36000
         },
         {
           "channels": 3,
+          "codec": null,
+          "extension": null,
+          "language": null,
           "name": "amb_odd",
+          "noted": false,
+          "range": null,
           "sample_rate": 12345,
           "samples": 12345
         }
@@ -117,14 +132,19 @@
       "format": "fsb5",
       "label": "fsb5",
       "noted": false,
-      "offset": 14388,
+      "offset": 14425,
       "sample_rate": 22050,
       "samples": 500,
       "size": 1072,
       "tracks": [
         {
           "channels": 1,
-          "name": null,
+          "codec": null,
+          "extension": null,
+          "language": null,
+          "name": "",
+          "noted": false,
+          "range": null,
           "sample_rate": 22050,
           "samples": 500
         }
@@ -137,7 +157,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": false,
-      "offset": 15511,
+      "offset": 15548,
       "sample_rate": 44100,
       "samples": 100000,
       "size": 1356,
@@ -150,7 +170,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": false,
-      "offset": 16909,
+      "offset": 16946,
       "sample_rate": 48000,
       "samples": 96000,
       "size": 604,
@@ -163,7 +183,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": false,
-      "offset": 17554,
+      "offset": 17591,
       "sample_rate": 44100,
       "samples": 5000,
       "size": 546,
@@ -176,7 +196,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": false,
-      "offset": 18100,
+      "offset": 18137,
       "sample_rate": 22050,
       "samples": 2000,
       "size": 136,
@@ -189,7 +209,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": false,
-      "offset": 18271,
+      "offset": 18308,
       "sample_rate": 48000,
       "samples": 3000,
       "size": 670,
@@ -202,7 +222,7 @@
       "format": "ogg",
       "label": "ogg",
       "noted": true,
-      "offset": 18957,
+      "offset": 18994,
       "sample_rate": 8000,
       "samples": 1600,
       "size": 294,
@@ -215,7 +235,7 @@
       "format": "riff",
       "label": "wav",
       "noted": false,
-      "offset": 19271,
+      "offset": 19308,
       "sample_rate": 8000,
       "samples": 349,
       "size": 394,
@@ -228,31 +248,234 @@
       "format": "riff",
       "label": "wav",
       "noted": true,
-      "offset": 19688,
+      "offset": 19725,
       "sample_rate": 48000,
       "samples": 100,
       "size": 448,
       "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "mixed",
+      "crc32": "dadee5d9",
+      "format": "bnk",
+      "label": "bnk",
+      "noted": false,
+      "offset": 20197,
+      "sample_rate": 48000,
+      "samples": null,
+      "size": 1994,
+      "tracks": [
+        {
+          "channels": 1,
+          "codec": "PCM 16-bit",
+          "extension": "wem",
+          "language": null,
+          "name": "111",
+          "noted": false,
+          "range": [
+            76,
+            468
+          ],
+          "sample_rate": 48000,
+          "samples": 200
+        },
+        {
+          "channels": 2,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": null,
+          "name": "222",
+          "noted": false,
+          "range": [
+            556,
+            794
+          ],
+          "sample_rate": 44100,
+          "samples": 88200
+        },
+        {
+          "channels": 2,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": null,
+          "name": "333",
+          "noted": true,
+          "range": [
+            1356,
+            600
+          ],
+          "sample_rate": 48000,
+          "samples": 960000
+        }
+      ]
+    },
+    {
+      "channels": 1,
+      "codec": "Wwise Vorbis",
+      "crc32": "94591da1",
+      "format": "bnk",
+      "label": "bnk BE",
+      "noted": false,
+      "offset": 22220,
+      "sample_rate": 32000,
+      "samples": 64000,
+      "size": 484,
+      "tracks": [
+        {
+          "channels": 1,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": null,
+          "name": "43981",
+          "noted": false,
+          "range": [
+            52,
+            394
+          ],
+          "sample_rate": 32000,
+          "samples": 64000
+        }
+      ]
+    },
+    {
+      "channels": 0,
+      "codec": "no media",
+      "crc32": "2caeb539",
+      "format": "bnk",
+      "label": "bnk",
+      "noted": false,
+      "offset": 22757,
+      "sample_rate": 0,
+      "samples": null,
+      "size": 62,
+      "tracks": []
+    },
+    {
+      "channels": 2,
+      "codec": "Wwise Vorbis",
+      "crc32": "1b2c671a",
+      "format": "pck",
+      "label": "pck",
+      "noted": false,
+      "offset": 22877,
+      "sample_rate": 48000,
+      "samples": null,
+      "size": 1592,
+      "tracks": [
+        {
+          "channels": 0,
+          "codec": "SoundBank",
+          "extension": "bnk",
+          "language": "sfx",
+          "name": "777",
+          "noted": false,
+          "range": [
+            176,
+            258
+          ],
+          "sample_rate": 0,
+          "samples": null
+        },
+        {
+          "channels": 2,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": "sfx",
+          "name": "100",
+          "noted": false,
+          "range": [
+            448,
+            494
+          ],
+          "sample_rate": 48000,
+          "samples": 48000
+        },
+        {
+          "channels": 1,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": "english(us)",
+          "name": "100",
+          "noted": false,
+          "range": [
+            944,
+            294
+          ],
+          "sample_rate": 48000,
+          "samples": 24000
+        },
+        {
+          "channels": 2,
+          "codec": "Wwise Vorbis",
+          "extension": "wem",
+          "language": "sfx",
+          "name": "4294967297",
+          "noted": false,
+          "range": [
+            1248,
+            344
+          ],
+          "sample_rate": 44100,
+          "samples": 44100
+        }
+      ]
+    },
+    {
+      "channels": 2,
+      "codec": "PCM 16-bit",
+      "crc32": "c03e79c6",
+      "format": "pck",
+      "label": "pck",
+      "noted": false,
+      "offset": 24494,
+      "sample_rate": 44100,
+      "samples": 100,
+      "size": 2516,
+      "tracks": [
+        {
+          "channels": 2,
+          "codec": "PCM 16-bit",
+          "extension": "wem",
+          "language": "sfx",
+          "name": "9",
+          "noted": false,
+          "range": [
+            2048,
+            468
+          ],
+          "sample_rate": 44100,
+          "samples": 100
+        }
+      ]
     }
   ],
   "description": "WAV, WEM (RIFF and RIFX), FSB5 (also inside a .bank), Ogg Vorbis/Opus/FLAC, chained and multiplexed Ogg, and traps",
   "rejected": [
     {
-      "offset": 20406,
+      "offset": 27235,
       "reason": "no fmt chunk"
     },
     {
-      "offset": 20578,
+      "offset": 27409,
       "reason": "unknown codec 99"
     },
     {
-      "offset": 20711,
+      "offset": 27550,
+      "reason": "media 1 runs past the end of the DATA section"
+    },
+    {
+      "offset": 27732,
+      "reason": "file 9 runs past the end of the input"
+    },
+    {
+      "offset": 27871,
       "reason": "the first page's CRC doesn't match"
     },
     {
-      "offset": 20815,
+      "offset": 27975,
       "reason": "runs past the end of the file"
     }
   ],
-  "size": 21850
+  "size": 29010
 }

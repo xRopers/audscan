@@ -6,17 +6,21 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use crate::error::{Error, Result, io_err};
+use crate::format::Track;
 use crate::manifest::{AudioEntry, Manifest};
 
 #[derive(Debug, Clone)]
 pub struct ExtractOptions {
     /// Refuse to extract if the input's size or CRC differs from the manifest's.
     pub verify_source: bool,
+    /// Also write each file inside a Wwise bank or package (WEMs, and a package's
+    /// SoundBanks) to a folder named after the bank: see [`Track::split_filename`].
+    pub split: bool,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
-        Self { verify_source: true }
+        Self { verify_source: true, split: false }
     }
 }
 
@@ -26,6 +30,8 @@ pub struct ExtractedFile {
     pub offset: u64,
     pub path: PathBuf,
     pub size: u64,
+    /// Files split out of it (with `split`).
+    pub split: Vec<PathBuf>,
 }
 
 /// The bytes of one file, checked against the manifest's CRC.
@@ -50,18 +56,53 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
     if let Some(bad) = manifest.audio.iter().find(|a| !is_safe_filename(&a.file)) {
         return Err(Error::BadFilename(bad.file.clone()));
     }
+    let splits: Vec<Vec<(String, &Track)>> = manifest
+        .audio
+        .iter()
+        .map(|a| if opts.split { split_files(a) } else { Ok(Vec::new()) })
+        .collect::<Result<_>>()?;
     let slices = manifest.audio.iter().map(|a| audio_bytes(data, a)).collect::<Result<Vec<_>>>()?;
     fs::create_dir_all(out_dir).map_err(io_err(out_dir))?;
     manifest
         .audio
         .par_iter()
         .zip(slices)
-        .map(|(entry, bytes)| {
+        .zip(splits)
+        .map(|((entry, bytes), splits)| {
             let path = out_dir.join(&entry.file);
             fs::write(&path, bytes).map_err(io_err(&path))?;
-            Ok(ExtractedFile { id: entry.id, offset: entry.offset, path, size: bytes.len() as u64 })
+            let folder = out_dir.join(entry.file.rsplit_once('.').map_or(entry.file.as_str(), |(stem, _)| stem));
+            let mut split = Vec::with_capacity(splits.len());
+            for (name, track) in splits {
+                let path = folder.join(&name);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(io_err(parent))?;
+                }
+                fs::write(&path, &bytes[track.offset as usize..(track.offset + track.size) as usize]).map_err(io_err(&path))?;
+                split.push(path);
+            }
+            Ok(ExtractedFile { id: entry.id, offset: entry.offset, path, size: bytes.len() as u64, split })
         })
         .collect()
+}
+
+/// The files `split` writes for one entry: every track that is a file of its own, by its
+/// relative path, checked to stay inside the bank's folder and to lie inside the bank.
+fn split_files(entry: &AudioEntry) -> Result<Vec<(String, &Track)>> {
+    let fail = |reason: String| Error::Audio { id: entry.id, offset: entry.offset, reason };
+    let mut files = Vec::new();
+    for track in &entry.tracks {
+        let Some(name) = track.split_filename() else { continue };
+        let plain_extension = track.extension.as_deref().is_some_and(|e| e.bytes().all(|b| b.is_ascii_alphanumeric()));
+        if !plain_extension || !name.split('/').all(is_safe_filename) {
+            return Err(Error::BadFilename(name));
+        }
+        if track.offset.checked_add(track.size).is_none_or(|end| end > entry.size) {
+            return Err(fail(format!("{name} lies outside it")));
+        }
+        files.push((name, track));
+    }
+    Ok(files)
 }
 
 /// A single file name with no directory parts, so a manifest can't write outside the

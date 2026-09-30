@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "audscan", version, about = "Find and extract audio (WAV, Wwise WEM, FMOD FSB5, Ogg) inside binary files")]
+#[command(name = "audscan", version, about = "Find and extract audio (WAV, Wwise WEM/BNK/PCK, FMOD FSB5, Ogg) inside binary files")]
 struct Cli {
     /// Print machine-readable JSON on stdout instead of text
     #[arg(long, global = true)]
@@ -28,14 +28,14 @@ enum Command {
         /// Also list headers that look like audio but can't be used, and why
         #[arg(long)]
         show_rejected: bool,
-        /// List every track of an FSB5 bank
+        /// List every track of an FSB5 bank, and every file in a Wwise bank or package
         #[arg(long)]
         tracks: bool,
         #[command(flatten)]
         filters: ScanArgs,
     },
     /// Extract the audio listed in a manifest (or found by a fresh scan if no manifest is
-    /// given), each as a file of its own: .wav, .wem, .fsb or .ogg
+    /// given), each as a file of its own: .wav, .wem, .fsb, .ogg, .bnk or .pck
     Extract {
         file: PathBuf,
         /// Manifest from `audscan scan -o`
@@ -47,6 +47,11 @@ enum Command {
         /// Extract even if the input's size or CRC no longer matches the manifest
         #[arg(long)]
         force: bool,
+        /// Also split Wwise banks and packages: each WEM (and a package's SoundBanks) is
+        /// written as <ID>.wem / <ID>.bnk in a folder named after the bank, in a
+        /// subfolder per language for localized files
+        #[arg(long)]
+        split: bool,
         /// Filters for the fresh scan (ignored with --manifest)
         #[command(flatten)]
         filters: ScanArgs,
@@ -55,7 +60,7 @@ enum Command {
 
 #[derive(Args)]
 struct ScanArgs {
-    /// Formats to look for, comma separated [default: all: riff, fsb5, ogg]
+    /// Formats to look for, comma separated [default: all: riff, fsb5, ogg, bnk, pck]
     #[arg(long, value_delimiter = ',', default_values_t = Container::ALL.to_vec(), hide_default_value = true)]
     formats: Vec<Container>,
 }
@@ -107,7 +112,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Extract { file, manifest, dir, force, filters } => {
+        Command::Extract { file, manifest, dir, force, split, filters } => {
             let data = input::open(&file)?;
             let manifest = match &manifest {
                 Some(path) => Manifest::load(path)?,
@@ -120,15 +125,25 @@ fn run(cli: Cli) -> Result<()> {
             if manifest.audio.is_empty() {
                 bail!("no audio to extract");
             }
-            let files = extract_all(&data, &manifest, &dir, &ExtractOptions { verify_source: !force })?;
+            let files = extract_all(&data, &manifest, &dir, &ExtractOptions { verify_source: !force, split })?;
             if cli.json {
                 let rows: Vec<_> = files
                     .iter()
-                    .map(|f| ExtractJson { id: f.id, offset: f.offset, path: f.path.display().to_string(), size: f.size })
+                    .map(|f| ExtractJson {
+                        id: f.id,
+                        offset: f.offset,
+                        path: f.path.display().to_string(),
+                        size: f.size,
+                        split: f.split.iter().map(|p| p.display().to_string()).collect(),
+                    })
                     .collect();
                 print_json(&rows)?;
             } else {
                 println!("{} audio file(s) extracted to {}", files.len(), dir.display());
+                let split_out: usize = files.iter().map(|f| f.split.len()).sum();
+                if split {
+                    println!("{split_out} file(s) split out of Wwise banks and packages");
+                }
             }
         }
     }
@@ -147,6 +162,8 @@ struct ExtractJson {
     offset: u64,
     path: String,
     size: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    split: Vec<String>,
 }
 
 fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
@@ -177,11 +194,13 @@ fn print_audio(audio: &[FoundAudio], tracks: bool) {
         let i = &a.info;
         let name = match i.tracks.as_slice() {
             [] => String::new(),
-            [one] => one.name.clone().unwrap_or_default(),
+            [one] => one.display_name(),
             many => {
-                let named: Vec<_> = many.iter().filter_map(|t| t.name.as_deref()).take(3).collect();
+                let named: Vec<_> = many.iter().map(|t| t.display_name()).filter(|n| !n.is_empty()).take(3).collect();
                 let more = if many.len() > named.len() && !named.is_empty() { ", ..." } else { "" };
-                format!("{} tracks{}{}{more}", many.len(), if named.is_empty() { "" } else { ": " }, named.join(", "))
+                let banks = many.iter().filter(|t| t.extension.as_deref() == Some("bnk")).count();
+                let what = if banks > 0 { format!("{} files ({banks} bnk, {} wem)", many.len(), many.len() - banks) } else { format!("{} tracks", many.len()) };
+                format!("{what}{}{}{more}", if named.is_empty() { "" } else { ": " }, named.join(", "))
             }
         };
         println!(
@@ -197,20 +216,26 @@ fn print_audio(audio: &[FoundAudio], tracks: bool) {
         if let Some(note) = &i.note {
             println!("{:>12}  note: {note}", "");
         }
-        if tracks && i.tracks.len() > 1 {
+        if tracks && (i.tracks.len() > 1 || i.tracks.iter().any(|t| t.extension.is_some())) {
             for (n, t) in i.tracks.iter().enumerate() {
-                let seconds = (t.sample_rate > 0).then(|| t.samples as f64 / f64::from(t.sample_rate));
+                let seconds = t.samples.filter(|_| t.sample_rate > 0).map(|s| s as f64 / f64::from(t.sample_rate));
+                let name = match &t.language {
+                    Some(lang) => format!("{} [{lang}]", t.display_name()),
+                    None => t.display_name(),
+                };
                 println!(
-                    "{:>12}  {:>10}  {:<6}  {:<18}  {:>2}  {:>6}  {:>10}  {}",
+                    "{:>12}  {:>10}  {:<6}  {:<18}  {:>2}  {:>6}  {:>10}  {name}",
                     format!("#{n}"),
                     t.size,
-                    "",
-                    "",
+                    t.extension.as_deref().unwrap_or(""),
+                    t.codec.as_deref().unwrap_or(""),
                     t.channels,
                     t.sample_rate,
                     length(seconds),
-                    t.name.as_deref().unwrap_or("")
                 );
+                if let Some(note) = &t.note {
+                    println!("{:>12}  note: {note}", "");
+                }
             }
         }
     }

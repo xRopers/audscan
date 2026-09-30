@@ -34,7 +34,7 @@ impl FoundAudio {
         self.offset + self.info.size
     }
 
-    /// `wav`, `wem`, `fsb5` or `ogg`, with ` BE` for RIFX.
+    /// `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
     pub fn label(&self) -> String {
         label(self.container, self.info.wwise, self.info.big_endian)
     }
