@@ -35,17 +35,17 @@ audscan extract game.pak -d audio/ --formats wem   # scan and extract in one go,
       0x10b0        3094  wem BE  Wwise Vorbis         2   48000    0:10.000
       0x1ce5        1602  wem     Wwise Vorbis         1   32000    0:03.000
       0x328b        1450  fsb5    Vorbis               2   44100    0:12.500  3 tracks: music_intro, vo_line_01, amb_odd
-      0x3cbc        1356  ogg     Vorbis               2   44100    0:02.268
-      0x4ee5        1994  bnk     mixed                1   48000    0:22.004  3 tracks: 111, 222, 333
-      0x595d        1592  pck     Wwise Vorbis         2   48000    0:02.500  4 files (1 bnk, 3 wem): 777, 100, 100, ...
+      0x3e45        1356  ogg     Vorbis               2   44100    0:02.268
+      0x50bf        1994  bnk     mixed                1   48000    0:22.004  3 tracks: 111, 222, 333
+      0x5b32        1592  pck     Wwise Vorbis         2   48000    0:02.500  4 files (1 bnk, 3 wem): 777, 100, 100, ...
           #0         258  bnk     SoundBank            0       0           -  777 [sfx]
           #1         494  wem     Wwise Vorbis         2   48000    0:01.000  100 [sfx]
           #2         294  wem     Wwise Vorbis         1   48000    0:00.500  100 [english(us)]
           #3         344  wem     Wwise Vorbis         2   44100    0:01.000  4294967297 [sfx]
 ...
-
-(The package's contents are listed with `--tracks`.)
 ```
+
+The rows starting `#` list what's inside a bank or package (`--tracks`).
 
 Every command takes `--json`. The input is never modified. `extract` refuses a file that no longer matches the manifest (`--force` overrides). `--show-rejected` lists headers that look like audio but can't be used, and why (a WAV with no `fmt ` chunk, a file cut off by the end of the input...).
 
