@@ -32,13 +32,14 @@ audscan scan game.pak --formats fmod        # FSB4 and FSB5 only (and wwise: WEM
 
 ```
       OFFSET        SIZE  FORMAT  CODEC               CH    RATE      LENGTH  NAME
-        0x99        4074  wav     PCM 16-bit           2   44100    0:00.023
-      0x10b0        3094  wem BE  Wwise Vorbis         2   48000    0:10.000
-      0x1ce5        1602  wem     Wwise Vorbis         1   32000    0:03.000
-      0x328b        1450  fsb5    Vorbis               2   44100    0:12.500  3 tracks: music_intro, vo_line_01, amb_odd
-      0x3e45        1356  ogg     Vorbis               2   44100    0:02.268
-      0x50bf        1994  bnk     mixed                1   48000    0:22.004  3 tracks: 111, 222, 333
-      0x5b32        1592  pck     Wwise Vorbis         2   48000    0:02.500  4 files (1 bnk, 3 wem): 777, 100, 100, ...
+        0xa4        4074  wav     PCM 16-bit           2   44100    0:00.023
+      0x10bb        3094  wem BE  Wwise Vorbis         2   48000    0:10.000
+      0x1cf0        1602  wem     Wwise Vorbis         1   32000    0:03.000
+      0x3296        1450  fsb5    Vorbis               2   44100    0:12.500  3 tracks: music_intro, vo_line_01, amb_odd
+      0x3cc7        1856  fsb4    mixed                2   44100    0:00.105  3 tracks: menu_theme, blip, voice_01
+      0x4b48        1356  ogg     Vorbis               2   44100    0:02.268
+      0x5da1        1994  bnk     mixed                1   48000    0:22.004  3 tracks: 111, 222, 333
+      0x6812        1592  pck     Wwise Vorbis         2   48000    0:02.500  4 files (1 bnk, 3 wem): 777, 100, 100, ...
           #0         258  bnk     SoundBank            0       0           -  777 [sfx]
           #1         494  wem     Wwise Vorbis         2   48000    0:01.000  100 [sfx]
           #2         294  wem     Wwise Vorbis         1   48000    0:00.500  100 [english(us)]
