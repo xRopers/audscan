@@ -67,6 +67,7 @@ Checked against real games:
 - **Aniimo** and **BioShock Infinite** (Wwise, 2013 to now): all 637 loose WEMs, 2,022 SoundBanks and both packages scan to exactly their length. The 113,000 sounds inside (Vorbis, Opus, PTADPCM, IMA ADPCM, PCM) all get a codec and a length, and the lengths agree with each file's byte rate. All 10,200 WEMs split out of BioShock's packages are exact, voice lines in an `english(us)` folder.
 - **Left 4 Dead 2**: all 26,725 WAVs scan to exactly their length. 7,175 of them needed the writer-mistake handling above.
 - All 1,772 other `.wav` files on the development machine (Windows, KiCad, Unreal Engine samples) are exact too.
+- Against vgmstream r2117, on 1,944 complete WEMs (loose, and split from banks and packages): channels, rate and length agree for every Vorbis, Opus, IMA ADPCM and PCM file. PTADPCM lengths are the exact count Wwise stores; vgmstream counts whole blocks, which adds up to one block of padding (under 64 samples). A sample of 150 WEMs decodes to exactly its length.
 
 ### Wwise SoundBanks (BNK) and file packages (PCK)
 
@@ -89,7 +90,9 @@ FSB5 is FMOD Studio's format (about 2013 on); FSB4 is FMOD Ex's (about 2006 to 2
   - Files are named after the track, with characters a file name can't hold replaced by `_`. Tracks with the same name get their number added, and unnamed ones are `track<N>`. Each file is read back and checked against the track before it's written.
 - All FSB5 codecs are named: PCM, GameCube ADPCM, IMA ADPCM, VAG/HEVAG, XMA, MPEG, CELT, ATRAC9, xWMA, Vorbis, FMOD ADPCM, Opus. FSB4 names each track's own (a bank can mix them): PCM, MPEG, IMA ADPCM, VAG, XMA, GameCube ADPCM, CELT.
 
-FSB5 is checked against real banks. **Slay the Spire 2** keeps FMOD Studio `.bank` files inside its Godot package: all 11 FSB5 banks are found (2,509 named Vorbis tracks, about 7 hours of audio), each ending exactly where its `.bank` does, and every split track is a one-track bank of exactly its length. So are the two in **VTube Studio**'s Unity `.resource` file (Unity stores AudioClips as FSB5). FSB4 is checked by test files only. Scanning 81 GB of a non-FMOD game's archives found no false FSB4 or FSB5 banks.
+FSB5 is checked against real banks. **Slay the Spire 2** keeps FMOD Studio `.bank` files inside its Godot package: all 11 FSB5 banks are found (2,509 named Vorbis tracks, about 7 hours of audio), each ending exactly where its `.bank` does, and every split track is a one-track bank of exactly its length. So are the two in **VTube Studio**'s Unity `.resource` file (Unity stores AudioClips as FSB5).
+
+Split tracks play. Checked with [vgmstream](https://github.com/vgmstream/vgmstream) r2117: each of the 2,511 split tracks has the same length, rate, channels, codec and name as the same subsong of its original bank. 120 of them (226 MB of audio) decode to exactly the same samples either way. FSB4 is checked by test files only. Scanning 81 GB of a non-FMOD game's archives found no false FSB4 or FSB5 banks.
 
 ### Ogg
 
