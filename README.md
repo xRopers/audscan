@@ -17,7 +17,7 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 ## Download
 
-Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe` (command line) and, from v0.2.0, `audscan-gui.exe` (desktop app). Nothing to install: the C runtime is built in.
+Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe` (command line) and `audscan-gui.exe` (desktop app). Nothing to install: the C runtime is built in.
 
 ## Build
 
