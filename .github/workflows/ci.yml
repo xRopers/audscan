@@ -27,15 +27,26 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets
 
+  # The core library and CLI keep the workspace MSRV; the GUI needs what egui needs.
   msrv:
-    name: MSRV (1.89)
+    name: MSRV (${{ matrix.toolchain }}, ${{ matrix.crates }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - toolchain: "1.89"
+            crates: core + cli
+            packages: -p audscan-core -p audscan-cli -p audscan-fixtures
+          - toolchain: "1.95"
+            crates: gui
+            packages: -p audscan-gui
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.89"
+          toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.89
-      - run: cargo check --workspace --all-targets
+          key: msrv-${{ matrix.toolchain }}
+      - run: cargo check ${{ matrix.packages }} --all-targets

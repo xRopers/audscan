@@ -119,13 +119,7 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
             let folder = out_dir.join(entry.file.rsplit_once('.').map_or(entry.file.as_str(), |(stem, _)| stem));
             for (name, index) in splits {
                 let track = &entry.tracks[index];
-                let file = match entry.format {
-                    Container::Fsb4 | Container::Fsb5 => {
-                        let split = if entry.format == Container::Fsb4 { fsb4::split_track } else { fsb5::split_track };
-                        Cow::Owned(split(bytes, index).map_err(|reason| Error::Audio { id: entry.id, offset: entry.offset, reason })?)
-                    }
-                    _ => Cow::Borrowed(&bytes[track.offset as usize..(track.offset + track.size) as usize]),
-                };
+                let file = track_bytes(entry, bytes, index)?;
                 let path = folder.join(&name);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(io_err(parent))?;
@@ -139,6 +133,23 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
             Ok(done)
         })
         .collect()
+}
+
+/// Track `index` of a bank or package as a file of its own, as `split` writes it: a Wwise
+/// WEM or SoundBank as it is, an FSB track as a WAV or one-track bank. `bytes` is the
+/// entry's whole file (from [`audio_bytes`]).
+pub fn track_bytes<'a>(entry: &AudioEntry, bytes: &'a [u8], index: usize) -> Result<Cow<'a, [u8]>> {
+    let fail = |reason: String| Error::Audio { id: entry.id, offset: entry.offset, reason };
+    let track = entry.tracks.get(index).ok_or_else(|| fail(format!("has no track {index}")))?;
+    match entry.format {
+        Container::Fsb4 => fsb4::split_track(bytes, index).map(Cow::Owned).map_err(fail),
+        Container::Fsb5 => fsb5::split_track(bytes, index).map(Cow::Owned).map_err(fail),
+        _ => {
+            let range = usize::try_from(track.offset).ok().zip(usize::try_from(track.offset + track.size).ok());
+            let slice = range.and_then(|(start, end)| bytes.get(start..end));
+            slice.map(Cow::Borrowed).ok_or_else(|| fail(format!("track {index} lies outside it")))
+        }
+    }
 }
 
 /// The files `split` writes for one entry, by relative path and track index: every track

@@ -7,6 +7,7 @@
 //! Front ends (CLI, later a GUI) call this library directly.
 
 pub mod convert;
+pub mod decode;
 pub mod error;
 pub mod extract;
 pub mod format;
@@ -16,8 +17,9 @@ pub mod manifest;
 pub mod scan;
 
 pub use convert::{ConvertError, Converted, convert_wem};
+pub use decode::{Pcm, decode_file};
 pub use error::{Error, Result};
-pub use extract::{ExtractOptions, ExtractedFile, audio_bytes, extract_all};
+pub use extract::{ExtractOptions, ExtractedFile, audio_bytes, extract_all, track_bytes};
 pub use format::{AudioFormat, AudioInfo, Container, Reject, Track, format_for};
 pub use manifest::{AudioEntry, Manifest, SourceInfo};
 pub use scan::{FoundAudio, Rejected, ScanOptions, ScanReport, audio_at, scan};

@@ -191,3 +191,13 @@ fn extract_converts_wems_and_split_bank_media() {
     let plain = extract_all(&data, &manifest, &dir.path().join("plain"), &ExtractOptions { split: true, ..Default::default() }).unwrap();
     assert!(plain.iter().all(|f| f.converted.is_empty()));
 }
+
+#[test]
+fn decode_file_plays_wems_and_wavs() {
+    let pcm = audscan_core::decode_file(&wwise_ima_wem(2, 3, &mut Rng::new(20))).unwrap();
+    assert_eq!((pcm.channels, pcm.sample_rate, pcm.frames()), (2, 48000, 3 * 64));
+    let pcm = audscan_core::decode_file(&audscan_fixtures::pcm_wav(1, 8000, 16, 100, &mut Rng::new(21))).unwrap();
+    assert_eq!((pcm.channels, pcm.frames()), (1, 100));
+    let pcm = audscan_core::decode_file(&audscan_fixtures::wwise_ptadpcm_wem(1, 2, 100, &mut Rng::new(22))).unwrap();
+    assert_eq!(pcm.frames(), 100);
+}

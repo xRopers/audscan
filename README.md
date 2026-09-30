@@ -8,17 +8,20 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 - **Scan** a file for WAV, Wwise WEM (RIFF and big-endian RIFX), Wwise SoundBanks (`.bnk`) and file packages (`.pck`), FMOD FSB4 and FSB5 banks and Ogg streams, with their codec, channels, sample rate and length, and what's inside each bank or package.
 - **Extract** them as `.wav`, `.wem`, `.bnk`, `.pck`, `.fsb` and `.ogg` files, byte for byte. With `--split`, every sound inside a bank or package also comes out as a file of its own: Wwise WEMs named by their ID, FMOD tracks by their name.
+- **Browse and play** it all in a desktop app: a table of everything found, each bank's tracks, a waveform and playback.
 - **Convert** WEMs to files any player opens: Wwise Vorbis and Opus to Ogg (rewrapped, not re-encoded, so nothing is lost), PCM, IMA ADPCM and PTADPCM to WAV. `audscan convert` for WEM files, or `extract --convert` for everything extracted.
 
-**Status: early.** Scan, extract, splitting and WEM conversion work. More formats, putting edited sounds back, and a desktop app are next.
+![audscan's desktop app: an FMOD bank's tracks, one selected with its waveform](docs/images/audscan-gui-bank.png)
+
+**Status: early.** Scan, extract, splitting, WEM conversion and the desktop app work. More formats and putting edited sounds back are next.
 
 ## Download
 
-Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe`, the command line. Nothing to install: the C runtime is built in.
+Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe` (command line) and, from v0.2.0, `audscan-gui.exe` (desktop app). Nothing to install: the C runtime is built in.
 
 ## Build
 
-Rust 1.89 or later:
+Rust 1.95 or later (1.89 for the command line alone):
 
 ```bash
 cargo build --release
@@ -57,6 +60,26 @@ audscan convert audio/*.wem -d playable/    # convert WEM files you already have
 The rows starting `#` list what's inside a bank or package (`--tracks`).
 
 Every command takes `--json`. The input is never modified. `extract` refuses a file that no longer matches the manifest (`--force` overrides). `--show-rejected` lists headers that look like audio but can't be used, and why (a WAV with no `fmt ` chunk, a file cut off by the end of the input...).
+
+## Desktop app
+
+```bash
+audscan-gui [FILE]
+```
+
+Open a file (or drop one on the window) and it's scanned straight away. Everything found is listed in a table you can sort and filter (by format, codec, name or offset), and a strip along the top shows where each file sits. Click one to see its details:
+
+- a bank or package lists its tracks (names or Wwise IDs, languages, codecs, lengths); pick one;
+- the waveform of the selected sound; **Play** (or Space) plays it, and clicking the waveform plays from there;
+- **Save file…** or **Save track…** writes it as it is; **Save as Ogg/WAV…** converts a WEM; **Extract tracks…** splits a whole bank.
+
+**Audio > Extract all…** extracts everything, split and converted. Up and down arrows move through the list.
+
+It plays what audscan can decode: WAV, WEM (Vorbis, PCM, IMA ADPCM, PTADPCM) and Ogg Vorbis. Opus, FLAC and FMOD's own Vorbis aren't played yet (FMOD strips the Vorbis setup that decoding needs). Playback uses Windows' own audio output, so it's Windows-only; elsewhere the app works without it.
+
+![A WAV selected in the desktop app, with its waveform](docs/images/audscan-gui-wav.png)
+
+The screenshots use made-up sounds from `docs/make_demo.py`.
 
 ## Formats
 
