@@ -1024,3 +1024,19 @@ pub fn wwise_pcm_wem(channels: u16, frames: usize, rng: &mut Rng) -> Vec<u8> {
     let fmt = fmt(false, 0xFFFE, channels, 44100, align, 16, &extra);
     riff(false, b"WAVE", &[(b"fmt ", fmt), (b"data", rng.bytes(frames * usize::from(align)))])
 }
+
+/// A Wwise PTADPCM WEM (tag 0x8311): 36-byte frames per channel, channels taking turns,
+/// the exact sample count at fmt+0x18 (a little short of the frames' 64 each).
+pub fn wwise_ptadpcm_wem(channels: u16, frames: usize, samples: u32, rng: &mut Rng) -> Vec<u8> {
+    let align = 36 * channels;
+    let mut data = Vec::new();
+    for _ in 0..frames * usize::from(channels) {
+        let mut frame = rng.bytes(36);
+        frame[4] = rng.below(12) as u8; // table index
+        data.extend(frame);
+    }
+    let mut extra = vec![0u8; 10];
+    extra[6..10].copy_from_slice(&samples.to_le_bytes()); // fmt+0x18
+    let fmt = fmt(false, 0x8311, channels, 44100, align, 4, &extra);
+    riff(false, b"WAVE", &[(b"fmt ", fmt), (b"data", data)])
+}

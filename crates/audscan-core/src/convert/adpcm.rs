@@ -1,4 +1,4 @@
-//! PCM and Wwise IMA ADPCM WEMs to WAV.
+//! PCM, Wwise IMA ADPCM and PTADPCM WEMs to WAV.
 //!
 //! PCM is copied into a plain WAV (big-endian RIFX samples made little-endian). Wwise IMA
 //! ADPCM is decoded to 16-bit PCM: blocks of `block_align` bytes, each channel's part a
@@ -68,6 +68,83 @@ fn decode_ima(data: &[u8], channels: usize, block_align: usize, samples: usize) 
     Ok(out)
 }
 
+/// PTADPCM steps and next indexes, by index (0–11; 12 and up give 0) and nibble. From
+/// vgmstream's `ptadpcm_decoder.c` (reverse engineered from Platinum Games' executables),
+/// ISC license: `data/COPYING-vgmstream`.
+#[rustfmt::skip]
+const PTADPCM: [[(i32, u8); 16]; 12] = [
+    [(-14, 2), (-10, 2), (-7, 1), (-5, 1), (-3, 0), (-2, 0), (-1, 0), (0, 0), (0, 0), (1, 0), (2, 0), (3, 0), (5, 1), (7, 1), (10, 2), (14, 2)],
+    [(-28, 3), (-20, 3), (-14, 2), (-10, 2), (-7, 1), (-5, 1), (-3, 1), (-1, 0), (1, 0), (3, 1), (5, 1), (7, 1), (10, 2), (14, 2), (20, 3), (28, 3)],
+    [(-56, 4), (-40, 4), (-28, 3), (-20, 3), (-14, 2), (-10, 2), (-6, 2), (-2, 1), (2, 1), (6, 2), (10, 2), (14, 2), (20, 3), (28, 3), (40, 4), (56, 4)],
+    [(-112, 5), (-80, 5), (-56, 4), (-40, 4), (-28, 3), (-20, 3), (-12, 3), (-4, 2), (4, 2), (12, 3), (20, 3), (28, 3), (40, 4), (56, 4), (80, 5), (112, 5)],
+    [(-224, 6), (-160, 6), (-112, 5), (-80, 5), (-56, 4), (-40, 4), (-24, 4), (-8, 3), (8, 3), (24, 4), (40, 4), (56, 4), (80, 5), (112, 5), (160, 6), (224, 6)],
+    [(-448, 7), (-320, 7), (-224, 6), (-160, 6), (-112, 5), (-80, 5), (-48, 5), (-16, 4), (16, 4), (48, 5), (80, 5), (112, 5), (160, 6), (224, 6), (320, 7), (448, 7)],
+    [(-896, 8), (-640, 8), (-448, 7), (-320, 7), (-224, 6), (-160, 6), (-96, 6), (-32, 5), (32, 5), (96, 6), (160, 6), (224, 6), (320, 7), (448, 7), (640, 8), (896, 8)],
+    [(-1792, 9), (-1280, 9), (-896, 8), (-640, 8), (-448, 7), (-320, 7), (-192, 7), (-64, 6), (64, 6), (192, 7), (320, 7), (448, 7), (640, 8), (896, 8), (1280, 9), (1792, 9)],
+    [(-3584, 10), (-2560, 10), (-1792, 9), (-1280, 9), (-896, 8), (-640, 8), (-384, 8), (-128, 7), (128, 7), (384, 8), (640, 8), (896, 8), (1280, 9), (1792, 9), (2560, 10), (3584, 10)],
+    [(-7168, 11), (-5120, 11), (-3584, 10), (-2560, 10), (-1792, 9), (-1280, 9), (-768, 9), (-256, 8), (256, 8), (768, 9), (1280, 9), (1792, 9), (2560, 10), (3584, 10), (5120, 11), (7168, 11)],
+    [(-14336, 11), (-10240, 11), (-7168, 11), (-5120, 11), (-3584, 10), (-2560, 10), (-1536, 10), (-512, 9), (512, 9), (1536, 10), (2560, 10), (3584, 10), (5120, 11), (7168, 11), (10240, 11), (14336, 11)],
+    [(-28672, 11), (-20480, 11), (-14336, 11), (-10240, 11), (-7168, 11), (-5120, 11), (-3072, 11), (-1024, 10), (1024, 10), (3072, 11), (5120, 11), (7168, 11), (10240, 11), (14336, 11), (20480, 11), (28672, 11)],
+];
+
+/// Decode Platinum's PTADPCM, as Wwise uses it: frames of `frame` bytes per channel,
+/// channels taking turns frame by frame. A frame is two 16-bit samples (output first), a
+/// table index, then nibbles, low first: each looks up a step and the next index, and the
+/// sample is `step + 2 * previous - the one before`. `samples` per channel at most.
+fn decode_ptadpcm(data: &[u8], channels: usize, frame: usize, samples: usize) -> Result<Vec<i16>, ConvertError> {
+    if channels == 0 || frame < 6 {
+        return Err(ConvertError::Invalid("a PTADPCM frame size that doesn't make sense".into()));
+    }
+    let per_frame = 2 + (frame - 5) * 2;
+    let mut out = Vec::with_capacity(samples * channels);
+    let mut produced = 0;
+    for block in data.chunks_exact(frame * channels) {
+        if produced >= samples {
+            break;
+        }
+        let frames = per_frame.min(samples - produced);
+        let start = out.len();
+        out.resize(start + frames * channels, 0);
+        for (ch, f) in block.chunks_exact(frame).enumerate() {
+            let (mut older, mut last) = (i32::from(i16::from_le_bytes([f[0], f[1]])), i32::from(i16::from_le_bytes([f[2], f[3]])));
+            let mut index = usize::from(f[4]);
+            for i in 0..frames {
+                let sample = match i {
+                    0 => older,
+                    1 => last,
+                    _ => {
+                        let byte = f[5 + (i - 2) / 2];
+                        let nibble = usize::from(if i % 2 == 0 { byte & 0x0F } else { byte >> 4 });
+                        let (step, next) = PTADPCM.get(index).map_or((0, 0), |row| row[nibble]);
+                        index = usize::from(next);
+                        let sample = (step + 2 * last - older).clamp(-32768, 32767);
+                        (older, last) = (last, sample);
+                        sample
+                    }
+                };
+                out[start + i * channels + ch] = sample as i16;
+            }
+        }
+        produced += frames;
+    }
+    Ok(out)
+}
+
+pub(crate) fn ptadpcm_to_wav(w: &Wem, samples: Option<u64>) -> Result<Vec<u8>, ConvertError> {
+    let channels = usize::from(w.channels);
+    let block = usize::from(w.block_align);
+    if channels == 0 || block == 0 || !block.is_multiple_of(channels) {
+        return Err(ConvertError::Invalid("a PTADPCM block that doesn't divide by channel".into()));
+    }
+    let frame = block / channels;
+    let data = &w.data[w.body.clone()];
+    let whole = data.len() / block * (2 + frame.saturating_sub(5) * 2);
+    // Wwise stores the exact length; the last frame is padding past it.
+    let samples = samples.map_or(whole, |s| (s as usize).min(whole));
+    let decoded = decode_ptadpcm(data, channels, frame, samples)?;
+    Ok(wav16(w.channels, w.sample_rate, &decoded))
+}
+
 /// A WAV of 16-bit samples.
 fn wav16(channels: u16, sample_rate: u32, samples: &[i16]) -> Vec<u8> {
     let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -99,6 +176,18 @@ pub(crate) fn pcm_to_wav(w: &Wem, float: bool) -> Result<Vec<u8>, ConvertError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ptadpcm_frames() {
+        // Index 0, nibble 0xF: +14 over the linear prediction 2 * last - older.
+        let mut frame = vec![0u8; 36];
+        frame[..4].copy_from_slice(&[10, 0, 20, 0]); // older 10, last 20
+        frame[5] = 0x0F; // first nibble 15, then 0
+        let out = decode_ptadpcm(&frame, 1, 36, 64).unwrap();
+        // 14 + 2 * 20 - 10 = 44 (index becomes 2); then nibble 0 at index 2: -56 + 2 * 44 - 20.
+        assert_eq!(out[..4], [10, 20, 44, 12]);
+        assert_eq!(out.len(), 64);
+    }
 
     #[test]
     fn ima_decodes_64_samples_per_36_byte_block() {

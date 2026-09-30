@@ -8,7 +8,7 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 - **Scan** a file for WAV, Wwise WEM (RIFF and big-endian RIFX), Wwise SoundBanks (`.bnk`) and file packages (`.pck`), FMOD FSB4 and FSB5 banks and Ogg streams, with their codec, channels, sample rate and length, and what's inside each bank or package.
 - **Extract** them as `.wav`, `.wem`, `.bnk`, `.pck`, `.fsb` and `.ogg` files, byte for byte. With `--split`, every sound inside a bank or package also comes out as a file of its own: Wwise WEMs named by their ID, FMOD tracks by their name.
-- **Convert** WEMs to files any player opens: Wwise Vorbis and Opus to Ogg (rewrapped, not re-encoded, so nothing is lost), PCM and IMA ADPCM to WAV. `audscan convert` for WEM files, or `extract --convert` for everything extracted.
+- **Convert** WEMs to files any player opens: Wwise Vorbis and Opus to Ogg (rewrapped, not re-encoded, so nothing is lost), PCM, IMA ADPCM and PTADPCM to WAV. `audscan convert` for WEM files, or `extract --convert` for everything extracted.
 
 **Status: early.** Scan, extract, splitting and WEM conversion work. More formats, putting edited sounds back, and a desktop app are next.
 
@@ -111,16 +111,16 @@ Split tracks play. Checked with [vgmstream](https://github.com/vgmstream/vgmstre
 | Wwise Opus | `.ogg` | Opus packets rewrapped in Ogg Opus: no re-encoding |
 | PCM | `.wav` | copied |
 | Wwise IMA ADPCM | `.wav` | decoded to 16-bit PCM |
-| Wwise PTADPCM | not yet | |
+| Wwise PTADPCM | `.wav` | decoded to 16-bit PCM, to the exact length Wwise stores |
 
 - Wwise leaves out most of what a Vorbis decoder needs. audscan rebuilds the three Vorbis headers, unpacking the codebooks from Wwise's standard table (Wwise 2011.2 and later), and puts back the bits Wwise strips from each audio packet (as [ww2ogg](https://github.com/hcs64/ww2ogg) does). It also works out every page's granule position and trims the end to the exact sample count, so no separate `revorb` pass is needed.
 - Prefetch media (the first seconds of a streamed sound that a bank keeps) can't be converted on their own: the rest of the sound is in the game's streamed files or `.pck`. Split and convert the package to get the whole sound.
 - Vorbis with more than 2 channels keeps Wwise's channel order (as in WAV: L R C LFE...), which players read in Vorbis's order (L C R...). The channels can't be reordered without re-encoding, so the conversion notes it. Mono and stereo, nearly all game audio, are unaffected.
 
-Checked with [vgmstream](https://github.com/vgmstream/vgmstream) r2117 on 1,690 real WEMs from Aniimo and BioShock Infinite: every converted file decodes to exactly the same samples as the WEM (520 Vorbis, 195 Opus, 275 IMA ADPCM including 40 stereo, and PCM). The one exception is a 5.1 Vorbis track, whose samples are the same with the channels in Wwise's order, as above. The tests also check the rebuilt Vorbis headers with an independent decoder ([lewton](https://github.com/RustAudio/lewton)).
+Checked with [vgmstream](https://github.com/vgmstream/vgmstream) r2117 on 1,690 real WEMs from Aniimo and BioShock Infinite: every converted file decodes to exactly the same samples as the WEM (520 Vorbis, 195 Opus, 275 IMA ADPCM including 40 stereo, PCM, and all 1,499 PTADPCM media in Aniimo's banks). The one exception is a 5.1 Vorbis track, whose samples are the same with the channels in Wwise's order, as above. The tests also check the rebuilt Vorbis headers with an independent decoder ([lewton](https://github.com/RustAudio/lewton)).
 
 ## License
 
 audscan is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 2 of the License, or (at your option) any later version (GPL-2.0-or-later). See [LICENSE](LICENSE).
 
-The Wwise Vorbis codebook table (`crates/audscan-core/data/packed_codebooks_aoTuV_603.bin`) comes from ww2ogg by Adam Gashlin, under the BSD 3-clause license in `crates/audscan-core/data/COPYING-ww2ogg`, which is compatible with the GPL.
+The Wwise Vorbis codebook table (`crates/audscan-core/data/packed_codebooks_aoTuV_603.bin`) comes from ww2ogg by Adam Gashlin, under the BSD 3-clause license in `crates/audscan-core/data/COPYING-ww2ogg`. The PTADPCM step table comes from vgmstream, under the ISC-style license in `crates/audscan-core/data/COPYING-vgmstream`. Both are compatible with the GPL.

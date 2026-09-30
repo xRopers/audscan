@@ -1,6 +1,6 @@
 //! Converting WEMs to files any player opens: Wwise Vorbis and Opus to Ogg (the packets
-//! rewrapped, not re-encoded), PCM and IMA ADPCM to WAV. PTADPCM and the older Opus
-//! variants aren't converted yet.
+//! rewrapped, not re-encoded), PCM, IMA ADPCM and PTADPCM to WAV. The older Opus variants
+//! aren't converted yet.
 
 mod adpcm;
 mod bits;
@@ -60,6 +60,7 @@ pub fn convert_wem(data: &[u8]) -> Result<Converted, ConvertError> {
         (0x0001, _) | (0xFFFE, None | Some(1)) => ("wav", adpcm::pcm_to_wav(&w, false)?),
         (0x0003, _) | (0xFFFE, Some(3)) => ("wav", adpcm::pcm_to_wav(&w, true)?),
         (0x0002, _) if short_fmt => ("wav", adpcm::ima_to_wav(&w, info.samples)?),
+        (0x8311, _) => ("wav", adpcm::ptadpcm_to_wav(&w, info.samples)?),
         _ => return Err(ConvertError::Unsupported(info.codec)),
     };
     Ok(Converted { extension, bytes, codec: info.codec, note })

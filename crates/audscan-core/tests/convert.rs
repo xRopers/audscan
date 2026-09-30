@@ -127,12 +127,19 @@ fn wwise_opus_becomes_ogg_opus() {
 }
 
 #[test]
-fn ima_and_pcm_become_wav() {
+fn ima_ptadpcm_and_pcm_become_wav() {
     for channels in [1, 2] {
         let c = convert_wem(&wwise_ima_wem(channels, 3, &mut Rng::new(5))).unwrap();
         assert_eq!((c.extension, c.codec.as_str()), ("wav", "Wwise IMA ADPCM"));
         let a = &scan(&c.bytes, &ScanOptions::default()).audio[0];
         assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.samples), ("PCM 16-bit", channels, Some(3 * 64)));
+    }
+    for channels in [1, 2] {
+        // 3 frames hold 192 samples; Wwise says 170, and the WAV stops there.
+        let c = convert_wem(&audscan_fixtures::wwise_ptadpcm_wem(channels, 3, 170, &mut Rng::new(10))).unwrap();
+        assert_eq!((c.extension, c.codec.as_str()), ("wav", "Wwise PTADPCM"));
+        let a = &scan(&c.bytes, &ScanOptions::default()).audio[0];
+        assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.samples), ("PCM 16-bit", channels, Some(170)));
     }
     let wem = wwise_pcm_wem(2, 100, &mut Rng::new(6));
     let c = convert_wem(&wem).unwrap();
