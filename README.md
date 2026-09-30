@@ -15,6 +15,19 @@ It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams)
 
 **Status: early.** Scan, extract, splitting, WEM conversion and the desktop app work. More formats and putting edited sounds back are next.
 
+## Why audscan over vgmstream
+
+[vgmstream](https://github.com/vgmstream/vgmstream) is the standard tool for playing game audio: it decodes hundreds of formats and plugs into foobar2000 and other players. It works on audio files you already have. audscan works a step earlier, and keeps the original data:
+
+- **Finds audio anywhere.** audscan scans any file for audio by its headers: packed archives, extracted blobs, memory dumps, formats nobody has written a reader for. It found 44,000 WEMs in Once Human's 81 GB of archives in a little over 2 minutes, without knowing its archive format.
+- **Extracts the originals.** Every file comes out byte for byte, as `.wem`, `.bnk`, `.fsb` or `.ogg`, with its exact size checked, so it can be modded, compared or put back.
+- **Splits banks into files you can use.** Each sound in a Wwise bank or package becomes its own `.wem`, named by its ID and sorted by language. Each FMOD track becomes a WAV or a one-track `.fsb` that vgmstream and FMOD's tools still open.
+- **Converts without re-encoding.** Wwise Vorbis and Opus become standard Ogg files holding the same packets, a fraction of the size of the uncompressed WAV a decoder writes, with the audio unchanged.
+- **Scriptable and safe.** A JSON manifest, `--json` output, and batch extraction of whole games in one command. The input is never modified.
+- **Tells you what's there.** Every bank's contents with names, IDs, languages, codecs and lengths, plus notes on what's unusual, such as prefetch media that's only the start of a streamed sound.
+
+When vgmstream is the better choice: to play or decode audio audscan can't. It handles far more codecs, including FMOD's Vorbis, console formats like XMA and ATRAC9, and loop points, and it plays inside your music player. The two work well together: audscan to find, extract and split, vgmstream to play anything audscan doesn't decode. audscan's own conversions are checked against vgmstream, and decode to exactly the same samples.
+
 ## Download
 
 Windows x64 builds are on the [Releases](https://github.com/xRopers/audscan/releases) page. The zip holds `audscan.exe` (command line) and `audscan-gui.exe` (desktop app). Nothing to install: the C runtime is built in.
