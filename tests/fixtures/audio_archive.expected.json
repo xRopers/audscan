@@ -1,0 +1,258 @@
+{
+  "audio": [
+    {
+      "channels": 2,
+      "codec": "PCM 16-bit",
+      "crc32": "3f4dbe54",
+      "format": "riff",
+      "label": "wav",
+      "noted": false,
+      "offset": 116,
+      "sample_rate": 44100,
+      "samples": 1000,
+      "size": 4074,
+      "tracks": []
+    },
+    {
+      "channels": 2,
+      "codec": "Wwise Vorbis",
+      "crc32": "24857de2",
+      "format": "riff",
+      "label": "wem BE",
+      "noted": false,
+      "offset": 4235,
+      "sample_rate": 48000,
+      "samples": 480000,
+      "size": 3094,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "Wwise Vorbis",
+      "crc32": "a3cbbb2f",
+      "format": "riff",
+      "label": "wem",
+      "noted": false,
+      "offset": 7360,
+      "sample_rate": 32000,
+      "samples": 96000,
+      "size": 1602,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "PCM 16-bit",
+      "crc32": "3355cecd",
+      "format": "riff",
+      "label": "wem",
+      "noted": false,
+      "offset": 9021,
+      "sample_rate": 48000,
+      "samples": 300,
+      "size": 668,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "MS ADPCM",
+      "crc32": "f01782dd",
+      "format": "riff",
+      "label": "wav",
+      "noted": false,
+      "offset": 9716,
+      "sample_rate": 22050,
+      "samples": 1234,
+      "size": 602,
+      "tracks": []
+    },
+    {
+      "channels": 6,
+      "codec": "IEEE float 32-bit",
+      "crc32": "3a6de708",
+      "format": "riff",
+      "label": "wav",
+      "noted": false,
+      "offset": 10347,
+      "sample_rate": 48000,
+      "samples": 100,
+      "size": 2468,
+      "tracks": []
+    },
+    {
+      "channels": 2,
+      "codec": "Vorbis",
+      "crc32": "cafb2309",
+      "format": "fsb5",
+      "label": "fsb5",
+      "noted": false,
+      "offset": 12902,
+      "sample_rate": 44100,
+      "samples": null,
+      "size": 1450,
+      "tracks": [
+        {
+          "channels": 2,
+          "name": "music_intro",
+          "sample_rate": 44100,
+          "samples": 441000
+        },
+        {
+          "channels": 1,
+          "name": "vo_line_01",
+          "sample_rate": 24000,
+          "samples": 36000
+        },
+        {
+          "channels": 3,
+          "name": "amb_odd",
+          "sample_rate": 12345,
+          "samples": 12345
+        }
+      ]
+    },
+    {
+      "channels": 1,
+      "codec": "PCM 16-bit",
+      "crc32": "340aeed1",
+      "format": "fsb5",
+      "label": "fsb5",
+      "noted": false,
+      "offset": 14388,
+      "sample_rate": 22050,
+      "samples": 500,
+      "size": 1072,
+      "tracks": [
+        {
+          "channels": 1,
+          "name": null,
+          "sample_rate": 22050,
+          "samples": 500
+        }
+      ]
+    },
+    {
+      "channels": 2,
+      "codec": "Vorbis",
+      "crc32": "83338355",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": false,
+      "offset": 15511,
+      "sample_rate": 44100,
+      "samples": 100000,
+      "size": 1356,
+      "tracks": []
+    },
+    {
+      "channels": 2,
+      "codec": "Opus",
+      "crc32": "11730a90",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": false,
+      "offset": 16909,
+      "sample_rate": 48000,
+      "samples": 96000,
+      "size": 604,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "FLAC",
+      "crc32": "4e151f2b",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": false,
+      "offset": 17554,
+      "sample_rate": 44100,
+      "samples": 5000,
+      "size": 546,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "Vorbis",
+      "crc32": "655d0e45",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": false,
+      "offset": 18100,
+      "sample_rate": 22050,
+      "samples": 2000,
+      "size": 136,
+      "tracks": []
+    },
+    {
+      "channels": 2,
+      "codec": "Theora + Vorbis",
+      "crc32": "a45dd82c",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": false,
+      "offset": 18271,
+      "sample_rate": 48000,
+      "samples": 3000,
+      "size": 670,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "Vorbis",
+      "crc32": "b2f57cac",
+      "format": "ogg",
+      "label": "ogg",
+      "noted": true,
+      "offset": 18957,
+      "sample_rate": 8000,
+      "samples": 1600,
+      "size": 294,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "PCM 8-bit",
+      "crc32": "a0c6ac89",
+      "format": "riff",
+      "label": "wav",
+      "noted": false,
+      "offset": 19271,
+      "sample_rate": 8000,
+      "samples": 349,
+      "size": 394,
+      "tracks": []
+    },
+    {
+      "channels": 1,
+      "codec": "IEEE float 32-bit",
+      "crc32": "41b478b0",
+      "format": "riff",
+      "label": "wav",
+      "noted": true,
+      "offset": 19688,
+      "sample_rate": 48000,
+      "samples": 100,
+      "size": 448,
+      "tracks": []
+    }
+  ],
+  "description": "WAV, WEM (RIFF and RIFX), FSB5 (also inside a .bank), Ogg Vorbis/Opus/FLAC, chained and multiplexed Ogg, and traps",
+  "rejected": [
+    {
+      "offset": 20406,
+      "reason": "no fmt chunk"
+    },
+    {
+      "offset": 20578,
+      "reason": "unknown codec 99"
+    },
+    {
+      "offset": 20711,
+      "reason": "the first page's CRC doesn't match"
+    },
+    {
+      "offset": 20815,
+      "reason": "runs past the end of the file"
+    }
+  ],
+  "size": 21850
+}

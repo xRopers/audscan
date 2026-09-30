@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/audscan-core", "crates/audscan-cli", "crates/audscan-fixtures"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-or-later"
+rust-version = "1.89"
+
+[workspace.dependencies]
+audscan-core = { path = "crates/audscan-core" }
+audscan-fixtures = { path = "crates/audscan-fixtures" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1.4"
+memchr = "2"
+memmap2 = "0.9"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"

@@ -1,0 +1,20 @@
+{
+  "audio": [
+    {
+      "channels": 1,
+      "codec": "PCM 16-bit",
+      "crc32": "b872f855",
+      "format": "riff",
+      "label": "wav",
+      "noted": false,
+      "offset": 0,
+      "sample_rate": 16000,
+      "samples": 800,
+      "size": 1670,
+      "tracks": []
+    }
+  ],
+  "description": "a single 16-bit mono PCM WAV",
+  "rejected": [],
+  "size": 1670
+}
