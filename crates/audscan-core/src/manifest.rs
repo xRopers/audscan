@@ -48,7 +48,7 @@ pub struct AudioEntry {
     /// Made by Wwise (extracted as `.wem`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub wwise: bool,
-    /// A bank's or package's contents (FSB5, BNK, PCK).
+    /// A bank's or package's contents (FSB4, FSB5, BNK, PCK).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<Track>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,7 +110,7 @@ impl AudioEntry {
         self.offset + self.size
     }
 
-    /// `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
+    /// `wav`, `wem`, `fsb4`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
     pub fn label(&self) -> String {
         label(self.format, self.wwise, self.big_endian)
     }

@@ -155,6 +155,54 @@ fn parse_wave(data: &[u8], prefix: bool) -> Result<AudioInfo, Reject> {
     })
 }
 
+/// How a bank stores PCM samples, for [`pcm_wav`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pcm {
+    /// Bytes per sample: 1 to 4.
+    pub bytes: u16,
+    /// 32-bit float rather than integer.
+    pub float: bool,
+    /// 8-bit samples are signed (WAV's are unsigned).
+    pub signed_8bit: bool,
+    /// Samples wider than a byte are big-endian (WAV's are little-endian).
+    pub big_endian: bool,
+}
+
+/// A WAV of interleaved PCM: `frames` of them, or as many as fit in `data`. Returns it and
+/// how many frames it holds. Samples are converted to WAV's conventions (8-bit unsigned,
+/// little-endian); nothing else changes.
+pub(crate) fn pcm_wav(pcm: Pcm, channels: u16, sample_rate: u32, frames: u64, data: &[u8]) -> (Vec<u8>, u64) {
+    let width = usize::from(pcm.bytes);
+    let frame = width * usize::from(channels.max(1));
+    let frames = (frames as usize).min(data.len() / frame);
+    let mut samples = data[..frames * frame].to_vec();
+    if width == 1 && pcm.signed_8bit {
+        samples.iter_mut().for_each(|b| *b ^= 0x80);
+    }
+    if width > 1 && pcm.big_endian {
+        samples.chunks_mut(width).for_each(<[u8]>::reverse);
+    }
+    let mut fmt = Vec::with_capacity(16);
+    fmt.extend_from_slice(&(if pcm.float { 3u16 } else { 1 }).to_le_bytes());
+    fmt.extend_from_slice(&channels.to_le_bytes());
+    fmt.extend_from_slice(&sample_rate.to_le_bytes());
+    fmt.extend_from_slice(&(sample_rate * frame as u32).to_le_bytes());
+    fmt.extend_from_slice(&(frame as u16).to_le_bytes());
+    fmt.extend_from_slice(&(pcm.bytes * 8).to_le_bytes());
+
+    let pad = samples.len() % 2;
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&((4 + 8 + fmt.len() + 8 + samples.len() + pad) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    out.extend(fmt);
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    out.extend(samples);
+    out.resize(out.len() + pad, 0);
+    (out, frames as u64)
+}
+
 /// The chunks that matter, by where their bodies are (the first of each kind).
 #[derive(Default)]
 struct Chunks {
@@ -259,6 +307,20 @@ mod tests {
         assert!(info.note.unwrap().starts_with("prefetch: the first 100 of"));
         // A whole file reads the same either way.
         assert_eq!(parse_prefix(&file), Riff.parse(&file));
+    }
+
+    #[test]
+    fn pcm_is_converted_to_wav_conventions() {
+        let pcm = Pcm { bytes: 2, float: false, signed_8bit: true, big_endian: true };
+        // Two stereo frames of big-endian 16-bit, plus a stray byte that isn't a frame.
+        let (wav, frames) = pcm_wav(pcm, 2, 8000, 10, &[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0xFF]);
+        assert_eq!(frames, 2);
+        assert!(wav.ends_with(&[0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xF0, 0xDE]));
+        let info = Riff.parse(&wav).unwrap();
+        assert_eq!((info.size, info.channels, info.samples), (wav.len() as u64, 2, Some(2)));
+        let pcm = Pcm { bytes: 1, float: false, signed_8bit: true, big_endian: false };
+        let (wav, _) = pcm_wav(pcm, 1, 8000, 3, &[0x00, 0x7F, 0x80]);
+        assert!(wav.ends_with(&[0x80, 0xFF, 0x00, 0]), "unsigned, and padded to even");
     }
 
     #[test]

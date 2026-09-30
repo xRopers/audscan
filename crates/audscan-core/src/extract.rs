@@ -9,7 +9,7 @@ use rayon::prelude::*;
 
 use crate::error::{Error, Result, io_err};
 use crate::format::Container;
-use crate::formats::fsb5::split_track;
+use crate::formats::{fsb4, fsb5};
 use crate::manifest::{AudioEntry, Manifest};
 
 #[derive(Debug, Clone)]
@@ -17,8 +17,8 @@ pub struct ExtractOptions {
     /// Refuse to extract if the input's size or CRC differs from the manifest's.
     pub verify_source: bool,
     /// Also write each track of a bank or package to a folder named after it: Wwise WEMs
-    /// and SoundBanks as they are, FSB5 tracks as WAV (PCM) or one-track FSB5 files. See
-    /// [`Track::split_filename`] and [`crate::formats::fsb5::split_track`].
+    /// and SoundBanks as they are, FSB4 and FSB5 tracks as WAV (PCM) or one-track banks.
+    /// See [`Track::split_filename`], [`fsb4::split_track`] and [`fsb5::split_track`].
     pub split: bool,
 }
 
@@ -80,9 +80,10 @@ pub fn extract_all(data: &[u8], manifest: &Manifest, out_dir: &Path, opts: &Extr
             for (name, index) in splits {
                 let track = &entry.tracks[index];
                 let file = match entry.format {
-                    Container::Fsb5 => Cow::Owned(
-                        split_track(bytes, index).map_err(|reason| Error::Audio { id: entry.id, offset: entry.offset, reason })?,
-                    ),
+                    Container::Fsb4 | Container::Fsb5 => {
+                        let split = if entry.format == Container::Fsb4 { fsb4::split_track } else { fsb5::split_track };
+                        Cow::Owned(split(bytes, index).map_err(|reason| Error::Audio { id: entry.id, offset: entry.offset, reason })?)
+                    }
                     _ => Cow::Borrowed(&bytes[track.offset as usize..(track.offset + track.size) as usize]),
                 };
                 let path = folder.join(&name);

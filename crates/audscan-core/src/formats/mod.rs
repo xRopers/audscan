@@ -1,6 +1,7 @@
 //! One file per audio format; see [`crate::format::AudioFormat`].
 
 pub mod bnk;
+pub mod fsb4;
 pub mod fsb5;
 pub mod ogg;
 pub mod pck;

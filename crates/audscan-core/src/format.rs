@@ -1,4 +1,4 @@
-//! The audio-format trait: each container format (RIFF/RIFX WAVE, FSB5, Ogg, Wwise
+//! The audio-format trait: each container format (RIFF/RIFX WAVE, FSB4, FSB5, Ogg, Wwise
 //! SoundBanks and file packages) is one file under `formats/` that recognises its header
 //! and works out the whole file's size.
 
@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub enum Container {
     /// RIFF or RIFX WAVE: `.wav` (PCM, ADPCM, XMA, xWMA...) and Wwise `.wem`.
     Riff,
+    /// FMOD Ex sound bank, version 4: `.fsb`.
+    Fsb4,
     /// FMOD sound bank, version 5: `.fsb`, also inside FMOD Studio `.bank` files.
     Fsb5,
     /// Ogg: Vorbis, Opus, FLAC or Speex.
@@ -24,15 +26,26 @@ pub enum Container {
 }
 
 impl Container {
-    pub const ALL: [Container; 5] = [Container::Riff, Container::Fsb5, Container::Ogg, Container::Bnk, Container::Pck];
+    pub const ALL: [Container; 6] = [Container::Riff, Container::Fsb4, Container::Fsb5, Container::Ogg, Container::Bnk, Container::Pck];
 
     pub fn name(self) -> &'static str {
         match self {
             Container::Riff => "riff",
+            Container::Fsb4 => "fsb4",
             Container::Fsb5 => "fsb5",
             Container::Ogg => "ogg",
             Container::Bnk => "bnk",
             Container::Pck => "pck",
+        }
+    }
+
+    /// A format name or a group of them, for `--formats`: `fmod` (or `fsb`) is FSB4 and
+    /// FSB5, `wwise` is WEM (RIFF), BNK and PCK; anything else is one format.
+    pub fn parse_group(s: &str) -> Result<Vec<Container>, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "fmod" | "fsb" => Ok(vec![Container::Fsb4, Container::Fsb5]),
+            "wwise" => Ok(vec![Container::Riff, Container::Bnk, Container::Pck]),
+            _ => Ok(vec![s.parse()?]),
         }
     }
 
@@ -54,11 +67,12 @@ impl FromStr for Container {
     fn from_str(s: &str) -> Result<Self, String> {
         match s.to_ascii_lowercase().as_str() {
             "riff" | "rifx" | "wav" | "wem" => Ok(Container::Riff),
-            "fsb5" | "fsb" | "fmod" => Ok(Container::Fsb5),
+            "fsb4" => Ok(Container::Fsb4),
+            "fsb5" => Ok(Container::Fsb5),
             "ogg" => Ok(Container::Ogg),
             "bnk" => Ok(Container::Bnk),
             "pck" | "akpk" => Ok(Container::Pck),
-            _ => Err(format!("unknown audio format {s:?} (known: riff, fsb5, ogg, bnk, pck)")),
+            _ => Err(format!("unknown audio format {s:?} (known: riff, fsb4, fsb5, ogg, bnk, pck; groups: fmod, wwise)")),
         }
     }
 }
@@ -66,7 +80,7 @@ impl FromStr for Container {
 /// One sound (or, in a Wwise package, one SoundBank) inside a bank or package.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
-    /// FSB5 names its sounds.
+    /// FSB4 and FSB5 name their sounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Wwise identifies files by number instead.
@@ -75,11 +89,11 @@ pub struct Track {
     /// A Wwise package's language for it (`sfx` for none), from the package's own map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
-    /// When tracks can differ (Wwise); an FSB5 bank has one codec for all.
+    /// When tracks can differ (Wwise, FSB4); an FSB5 bank has one codec for all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
-    /// The type of file it's split out as: a Wwise `wem` or `bnk` is one already; an FSB5
-    /// track becomes a `wav` (PCM) or a one-track `fsb`.
+    /// The type of file it's split out as: a Wwise `wem` or `bnk` is one already; an FSB4
+    /// or FSB5 track becomes a `wav` (PCM) or a one-track `fsb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension: Option<String>,
     /// 0 when unknown or not audio (a SoundBank in a package).
@@ -182,17 +196,18 @@ pub fn extension(container: Container, wwise: bool) -> &'static str {
     match container {
         Container::Riff if wwise => "wem",
         Container::Riff => "wav",
-        Container::Fsb5 => "fsb",
+        Container::Fsb4 | Container::Fsb5 => "fsb",
         Container::Ogg => "ogg",
         Container::Bnk => "bnk",
         Container::Pck => "pck",
     }
 }
 
-/// A short label for listings: `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for
+/// A short label for listings: `wav`, `wem`, `fsb4`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for
 /// big-endian files (RIFX, and Wwise banks and packages from big-endian consoles).
 pub fn label(container: Container, wwise: bool, big_endian: bool) -> String {
     let name = match container {
+        Container::Fsb4 => "fsb4",
         Container::Fsb5 => "fsb5",
         c => extension(c, wwise),
     };
@@ -223,6 +238,7 @@ pub trait AudioFormat: Sync {
 pub fn format_for(container: Container) -> &'static dyn AudioFormat {
     match container {
         Container::Riff => &crate::formats::riff::Riff,
+        Container::Fsb4 => &crate::formats::fsb4::Fsb4,
         Container::Fsb5 => &crate::formats::fsb5::Fsb5,
         Container::Ogg => &crate::formats::ogg::Ogg,
         Container::Bnk => &crate::formats::bnk::Bnk,
@@ -251,10 +267,14 @@ mod tests {
 
     #[test]
     fn names_and_aliases() {
-        for (text, c) in [("WEM", Container::Riff), ("rifx", Container::Riff), ("fmod", Container::Fsb5), ("ogg", Container::Ogg)] {
+        for (text, c) in [("WEM", Container::Riff), ("rifx", Container::Riff), ("FSB4", Container::Fsb4), ("ogg", Container::Ogg)] {
             assert_eq!(text.parse::<Container>().unwrap(), c);
         }
         assert_eq!("AKPK".parse::<Container>().unwrap(), Container::Pck);
+        assert_eq!(Container::parse_group("fmod").unwrap(), [Container::Fsb4, Container::Fsb5]);
+        assert_eq!(Container::parse_group("Wwise").unwrap(), [Container::Riff, Container::Bnk, Container::Pck]);
+        assert_eq!(Container::parse_group("ogg").unwrap(), [Container::Ogg]);
+        assert!(Container::parse_group("mp3").is_err());
         assert!("mp3".parse::<Container>().is_err());
         assert_eq!(label(Container::Riff, true, true), "wem BE");
         assert_eq!(label(Container::Fsb5, false, false), "fsb5");

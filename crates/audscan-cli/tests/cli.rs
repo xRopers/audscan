@@ -97,8 +97,9 @@ fn formats_filter_takes_aliases() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let formats: Vec<_> = json["audio"].as_array().unwrap().iter().map(|a| a["format"].as_str().unwrap().to_string()).collect();
-    assert!(formats.iter().all(|f| f == "riff" || f == "fsb5"), "{formats:?}");
-    assert!(formats.contains(&"fsb5".to_string()));
+    // wem is RIFF; fmod is FSB4 and FSB5.
+    assert!(formats.iter().all(|f| f == "riff" || f == "fsb4" || f == "fsb5"), "{formats:?}");
+    assert!(formats.contains(&"fsb4".to_string()) && formats.contains(&"fsb5".to_string()));
 }
 
 #[test]
@@ -109,8 +110,9 @@ fn extract_split_writes_wwise_files_and_lists_them() {
     let out_dir = dir.path().join("out");
     let out = audscan().arg("extract").arg(&input).arg("-d").arg(&out_dir).arg("--split").output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // 3 + 1 + 3 from the FSB5 banks, 3 + 1 from the Wwise banks, 4 + 1 from the packages.
-    assert!(String::from_utf8_lossy(&out.stdout).contains("16 file(s) split out"), "{}", String::from_utf8_lossy(&out.stdout));
+    // 3 + 3 + 1 from the FSB4 banks, 3 + 1 + 3 from the FSB5 ones, 3 + 1 from the Wwise
+    // banks, 4 + 1 from the packages.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("23 file(s) split out"), "{}", String::from_utf8_lossy(&out.stdout));
     let pck = f.expected.iter().find(|e| e.container == "pck").unwrap();
     assert!(out_dir.join(format!("{:08x}", pck.offset)).join("english(us)").join("100.wem").exists());
 

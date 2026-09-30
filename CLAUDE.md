@@ -1,7 +1,7 @@
 # audscan — audio scanner, extractor and (later) packer
 
 ## Goal
-Find standard audio files (RIFF/RIFX WAVE including Wwise `.wem`, Wwise `.bnk` and `.pck`, FMOD FSB5 banks, Ogg) inside arbitrary binary files — game archives, extracted blobs, memory dumps — extract them, and later reinject edited versions, the way packzip does for zlib. One fast CLI, manifest-driven, with verification; a GUI later on the same core library. A sibling of zscan (`E:\zscan`, github.com/xRopers/zscan) and texscan (`E:\texscan`, github.com/xRopers/texscan): same structure, conventions and style. texscan is the closest model; copy its patterns first.
+Find standard audio files (RIFF/RIFX WAVE including Wwise `.wem`, Wwise `.bnk` and `.pck`, FMOD FSB4 and FSB5 banks, Ogg) inside arbitrary binary files — game archives, extracted blobs, memory dumps — extract them, and later reinject edited versions, the way packzip does for zlib. One fast CLI, manifest-driven, with verification; a GUI later on the same core library. A sibling of zscan (`E:\zscan`, github.com/xRopers/zscan) and texscan (`E:\texscan`, github.com/xRopers/texscan): same structure, conventions and style. texscan is the closest model; copy its patterns first.
 
 ## Language and key crates
 - Rust workspace, edition 2024, MSRV 1.89, license GPL-2.0-or-later (like zscan and texscan). Check licenses against GPL-2.0-or-later before adding a crate (Apache-2.0-only code makes binaries GPL-3; ask first)
@@ -13,7 +13,7 @@ Find standard audio files (RIFF/RIFX WAVE including Wwise `.wem`, Wwise `.bnk` a
 audscan/
   crates/
     audscan-core/       # library: formats, scan, manifest, extract (later decode, pack)
-      src/formats/      # one file per container format: riff.rs, fsb5.rs, ogg.rs, bnk.rs, pck.rs
+      src/formats/      # one file per container format: riff.rs, fsb4.rs, fsb5.rs, ogg.rs, bnk.rs, pck.rs
     audscan-cli/        # clap CLI, binary `audscan`
     audscan-fixtures/   # deterministic fixtures; `gen-fixtures` writes tests/fixtures/
   tests/fixtures/       # generated .bin + .expected.json, checked in
@@ -22,10 +22,10 @@ The core must never depend on the CLI or GUI.
 
 ## CLI
 ```
-audscan scan    <file> [-o manifest.json] [--show-rejected] [--tracks] [--formats riff,fsb5,ogg,bnk,pck]
+audscan scan    <file> [-o manifest.json] [--show-rejected] [--tracks] [--formats riff,fsb4,fsb5,ogg,bnk,pck]
 audscan extract <file> [-m manifest.json] -d out/ [--force] [--split]
 ```
-All commands support `--json`. `--formats` takes aliases (`wav`, `wem`, `rifx` → riff; `fsb`, `fmod` → fsb5; `akpk` → pck).
+All commands support `--json`. `--formats` takes aliases (`wav`, `wem`, `rifx` → riff; `akpk` → pck) and groups (`Container::parse_group`: `fmod`/`fsb` → fsb4 + fsb5; `wwise` → riff + bnk + pck).
 
 ## How it differs from texscan
 - Audio containers mostly state their size outright (RIFF size, FSB5 section sizes); Ogg has none and is walked page by page, checking every page's CRC.
@@ -34,16 +34,18 @@ All commands support `--json`. `--formats` takes aliases (`wav`, `wem`, `rifx` �
 
 ## Build order
 1. Workspace, `AudioFormat` trait, RIFF/RIFX + FSB5 + Ogg scan, manifest, extract, fixtures. **(done)**
-2. More containers: Wwise `.bnk` and `.pck` **(done)**; FSB5 per-track splitting **(done)**; FSB4 and FSB3; XWB/XSB; AIFF/AIFC; MP3 frames (no magic, opt-in).
+2. More containers: Wwise `.bnk` and `.pck` **(done)**; FSB5 per-track splitting **(done)**; FSB4 **(done)**; FSB3; XWB/XSB; AIFF/AIFC; MP3 frames (no magic, opt-in).
 3. Decode for previews and export to WAV: PCM/ADPCM first, then Vorbis/Opus (Wwise Vorbis needs its headers rebuilt).
 4. Pack: replace with a same-format file that fits, verify; then length fields and relocation.
 5. GUI (egui, like texscan-gui): file strip, table, track list, playback, replace/revert, pack window.
 6. Optionally scan inside compressed streams by depending on `zscan-core`.
 
 ## Status
-- Stage 1 done: `audscan scan | extract [--split]`. Wwise BNK and PCK, and FSB5 splitting, added (stage 2, part).
+- Stage 1 done: `audscan scan | extract [--split]`. Wwise BNK and PCK, FSB5 splitting and FSB4 added (stage 2, part).
+- FSB4 (`formats/fsb4.rs`): header 0x30 (`FSB4`, count, header-area size, data size, version with 4 in the top 16 bits, flags: 0x02 basic headers, 0x08 big-endian PCM, 0x10 not interleaved); size = 0x30 + headers + data. Full track header: u16 size (≥ 0x50), name[30], samples, bytes, loop start/end, mode flags, rate, vol/pan/pri, channels (0 → from the stereo flag), floats, variations, extras. Basic headers: 8 bytes (samples, bytes), the rest from the first track. Codec from mode flags (MPEG, IMA ADPCM, VAG, XMA, GC ADPCM, CELT, else PCM 8/32/16-bit), per track; bank codec shared or `mixed`. Data alignment isn't stored: the first of 32, 16, 1 for which the padded lengths (last maybe unpadded) come to the data size; none fits but the sum is smaller → align 1 with a note; bigger → rejected. `Track::size` is the track's own byte length (not to the next track, unlike FSB5). Split: interleaved or mono PCM → WAV (`riff::pcm_wav`: signed 8-bit unless the unsigned flag, big-endian if the bank flag says), else a one-track FSB4 (the bank's header with count/sizes set and the basic-headers flag cleared; the track's full header, or for a basic one the first's with this track's lengths, no name, loop reset). Checked by read-back like FSB5. No real FSB4 here: fixtures only; 81 GB of Once Human `.npk` scanned with `--formats fmod` finds no false positives.
+- `riff::pcm_wav(Pcm { bytes, float, signed_8bit, big_endian }, channels, rate, frames, data)`: the shared PCM → WAV writer for splitting (frames capped by the data).
 - Splitting (`extract.rs`, `split_files`): each track with an `extension` goes to `{bank file stem}/{Track::split_filename(index)}`; names that collide (case-insensitively, as on Windows) get `_{index}`; every path component and the extension are checked (plain name, alphanumeric extension) and each track must lie inside its bank, all before anything is written. Wwise tracks are copied as sliced; FSB5 tracks go through `fsb5::split_track`.
-- FSB5 splitting (`fsb5::split_track`): PCM codecs (1–5) → WAV (16-byte fmt, tag 1 or 3 for float; frames = min(track samples, data / frame); 8-bit flipped signed → unsigned). Others → a one-track FSB5: the bank's own fixed header with count, header size, name-table size and data size rewritten; the track's header bytes (packed u64 with the data-offset bits zeroed, extra chunks copied, so Vorbis setup CRCs, XMA seek tables etc. survive); a name table of one entry padded to 4; the track's data (to the next track, padding included). The result is parsed back (Riff or Fsb5) and must match size, channels, rate, samples and name, else an error. `Track::extension` is `wav`/`fsb` for FSB5 tracks. `fsb5::read` returns the parse plus a `Layout` (header size, codec, each track's header byte range) for this. No real FSB5 on this machine: checked by fixtures only (Vorbis bank with extra chunks, v0 PCM16, PCM8 with duplicate and unsafe names and an unnamed track).
+- FSB5 splitting (`fsb5::split_track`): PCM codecs (1–5) → WAV via `riff::pcm_wav` (tag 1, or 3 for float; 8-bit flipped signed → unsigned). Others → a one-track FSB5: the bank's own fixed header with count, header size, name-table size and data size rewritten; the track's header bytes (packed u64 with the data-offset bits zeroed, extra chunks copied, so Vorbis setup CRCs, XMA seek tables etc. survive); a name table of one entry padded to 4; the track's data (to the next track, padding included). The result is parsed back (Riff or Fsb5) and must match size, channels, rate, samples and name, else an error. `Track::extension` is `wav`/`fsb` for FSB5 tracks. `fsb5::read` returns the parse plus a `Layout` (header size, codec, each track's header byte range) for this. No real FSB5 on this machine: checked by fixtures only (Vorbis bank with extra chunks, v0 PCM16, PCM8 with duplicate and unsafe names and an unnamed track).
 - `Track` (format.rs): a sound or file inside a bank/package: name (FSB5) or id (Wwise), language (PCK), codec (Wwise, per track), extension (what `--split` writes: `wem`/`bnk`/`wav`/`fsb`), channels/rate (0 if not audio), samples, offset/size from the container's start, note (prefetch). `display_name()`; `split_filename(index)` = `{lang}/{id}.{ext}` for Wwise (no folder for `sfx` or unsafe names), `{safe name}.{ext}` or `track{index}.{ext}` for FSB5. `AudioInfo::duration` of a bank sums its audio tracks, `None` if any is unknown.
 - BNK (`formats/bnk.rs`): sections (tag + u32 size) from `BKHD` while the tag is a known one (BKHD DIDX DATA HIRC STID STMG ENVS FXPR PLAT INIT; a second BKHD is the next bank); size = end of the last. Byte order: whichever reads a bank version in 1..=0x1000 at +8; BKHD must be 8..=64 KiB. DIDX entries (id, offset in DATA, size) become tracks, described by `riff::parse_prefix`; zero-size entries are skipped. Codec = the WEMs' shared codec, `mixed`, or `no media`.
 - Prefetch media: banks keep the first part of a streamed WEM. `riff::parse_prefix` reads a header whose file is cut short: size = what's there, samples from the declared data size, note `prefetch: the first N of M bytes`. Before BNK support the plain RIFF scan took those at their declared size and swallowed the media after them (Once Human: ~1,900 sounds missed).

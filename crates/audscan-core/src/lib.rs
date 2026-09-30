@@ -1,5 +1,5 @@
 //! audscan-core: find audio (RIFF/RIFX WAVE including Wwise `.wem`, Wwise SoundBanks and
-//! packages, FMOD FSB5 banks, Ogg) inside arbitrary binary files and extract it; later,
+//! packages, FMOD FSB4 and FSB5 banks, Ogg) inside arbitrary binary files and extract it; later,
 //! reinject edited versions.
 //!
 //! The typical flow is [`input::open`] → [`scan()`] → [`Manifest::new`] → [`extract_all`].

@@ -6,8 +6,8 @@ Games usually keep their sounds as standard files packed inside their own archiv
 
 It's a sibling of [zscan](https://github.com/xRopers/zscan) (compressed streams) and [texscan](https://github.com/xRopers/texscan) (textures), and works the same way: a scan writes a JSON manifest, and later steps work from it.
 
-- **Scan** a file for WAV, Wwise WEM (RIFF and big-endian RIFX), Wwise SoundBanks (`.bnk`) and file packages (`.pck`), FMOD FSB5 banks and Ogg streams, with their codec, channels, sample rate and length, and what's inside each bank or package.
-- **Extract** them as `.wav`, `.wem`, `.bnk`, `.pck`, `.fsb` and `.ogg` files, byte for byte. With `--split`, every sound inside a bank or package also comes out as a file of its own: Wwise WEMs named by their ID, FSB5 tracks by their name.
+- **Scan** a file for WAV, Wwise WEM (RIFF and big-endian RIFX), Wwise SoundBanks (`.bnk`) and file packages (`.pck`), FMOD FSB4 and FSB5 banks and Ogg streams, with their codec, channels, sample rate and length, and what's inside each bank or package.
+- **Extract** them as `.wav`, `.wem`, `.bnk`, `.pck`, `.fsb` and `.ogg` files, byte for byte. With `--split`, every sound inside a bank or package also comes out as a file of its own: Wwise WEMs named by their ID, FMOD tracks by their name.
 
 **Status: early.** Scan, extract and splitting work. More formats, conversion to WAV, putting edited sounds back, and a desktop app are next.
 
@@ -27,6 +27,7 @@ audscan scan game.pak --tracks              # also list what's inside each bank 
 audscan extract game.pak -m manifest.json -d audio/
 audscan extract game.pak -d audio/ --split  # also each sound inside a bank or package
 audscan extract game.pak -d audio/ --formats wem   # scan and extract in one go, WEMs only
+audscan scan game.pak --formats fmod        # FSB4 and FSB5 only (and wwise: WEM, BNK, PCK)
 ```
 
 ```
@@ -69,14 +70,19 @@ Checked against Once Human's archives (a Wwise game): 81 GB scanned in 140 secon
 
 On Once Human, every one of the 1,215 banks was found without a problem. Of the WEMs split out of one archive, all 90 complete ones scan to exactly their length. 4 more are prefetch media and 4 banks hold media that aren't WEMs, likely plugin data such as reverb impulse responses (listed as unknown).
 
-### FMOD sound banks (FSB5)
+### FMOD sound banks (FSB4, FSB5)
+
+FSB5 is FMOD Studio's format (about 2013 on); FSB4 is FMOD Ex's (about 2006 to 2013).
 
 - The whole bank is found and extracted as one `.fsb`, with its track list: names, channels, sample rates, lengths and where each track's data is.
+- FSB4 banks with "basic headers" (only the first track described in full) work, and so does big-endian PCM. FSB4 doesn't record how the tracks' data is aligned; it's worked out from the data size.
 - `extract --split` writes each track as a file of its own, in a folder named after the bank:
-  - PCM tracks (8-, 16-, 24-, 32-bit, float) as ordinary `.wav` files.
-  - Every other codec as a one-track `.fsb`: the bank's header cut down to that track, with its data copied unchanged. vgmstream, foobar2000 (with vgmstream) and FMOD's tools play these. The raw data alone wouldn't play: Vorbis in FSB5 has no setup headers, and XMA, ADPCM and the rest need their parameters from the track header.
+  - PCM tracks (8-, 16-, 24-, 32-bit, float) as ordinary `.wav` files, converted where WAV needs it (signed 8-bit to unsigned, big-endian to little-endian).
+  - Every other codec as a one-track `.fsb` of the same version: the bank's header cut down to that track, with its data copied unchanged. vgmstream, foobar2000 (with vgmstream) and FMOD's tools play these. The raw data alone wouldn't play: Vorbis in FSB5 has no setup headers, and XMA, ADPCM and the rest need their parameters from the track header.
   - Files are named after the track, with characters a file name can't hold replaced by `_`. Tracks with the same name get their number added, and unnamed ones are `track<N>`. Each file is read back and checked against the track before it's written.
-- All FSB5 codecs are named: PCM, GameCube ADPCM, IMA ADPCM, VAG/HEVAG, XMA, MPEG, CELT, ATRAC9, xWMA, Vorbis, FMOD ADPCM, Opus.
+- All FSB5 codecs are named: PCM, GameCube ADPCM, IMA ADPCM, VAG/HEVAG, XMA, MPEG, CELT, ATRAC9, xWMA, Vorbis, FMOD ADPCM, Opus. FSB4 names each track's own (a bank can mix them): PCM, MPEG, IMA ADPCM, VAG, XMA, GameCube ADPCM, CELT.
+
+No real FMOD banks were available to test against, so FMOD support is checked by test files written independently of audscan. Scanning 81 GB of a non-FMOD game's archives found no false FSB4 or FSB5 banks.
 
 ### Ogg
 

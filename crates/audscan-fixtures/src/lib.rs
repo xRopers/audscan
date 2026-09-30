@@ -33,9 +33,9 @@ impl Rng {
 pub struct Expected {
     pub offset: usize,
     pub size: usize,
-    /// `riff`, `fsb5`, `ogg`, `bnk` or `pck`.
+    /// `riff`, `fsb4`, `fsb5`, `ogg`, `bnk` or `pck`.
     pub container: &'static str,
-    /// `wav`, `wem`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
+    /// `wav`, `wem`, `fsb4`, `fsb5`, `ogg`, `bnk` or `pck`, with ` BE` for big-endian files.
     pub label: &'static str,
     pub codec: &'static str,
     pub channels: u16,
@@ -54,9 +54,9 @@ pub struct ExpectedTrack {
     /// FSB5's name, or the Wwise ID in decimal.
     pub name: String,
     pub language: Option<&'static str>,
-    /// Per track for Wwise; `None` for FSB5.
+    /// Per track for Wwise and FSB4; `None` for FSB5.
     pub codec: Option<&'static str>,
-    /// What it's split out as: `wem` or `bnk` for Wwise, `wav` or `fsb` for FSB5.
+    /// What it's split out as: `wem` or `bnk` for Wwise, `wav` or `fsb` for FMOD.
     pub extension: Option<&'static str>,
     pub channels: u16,
     pub sample_rate: u32,
@@ -74,6 +74,11 @@ impl ExpectedTrack {
         let name = name.unwrap_or("").to_string();
         let extension = Some(extension);
         Self { name, language: None, codec: None, extension, channels, sample_rate, samples: Some(samples), noted: false, range: None }
+    }
+
+    /// An FSB4 track: like FSB5's, with a codec of its own.
+    pub fn fsb4(extension: &'static str, codec: &'static str, name: Option<&str>, channels: u16, sample_rate: u32, samples: u64) -> Self {
+        Self { codec: Some(codec), ..Self::fsb(extension, name, channels, sample_rate, samples) }
     }
 }
 
@@ -271,6 +276,62 @@ pub fn fsb5(version: u32, codec: u32, tracks: &[FsbTrack], rng: &mut Rng) -> Vec
     out.resize(if version == 0 { 0x40 } else { 0x3C }, 0);
     out.extend(headers);
     out.extend(names);
+    out.extend(data);
+    out
+}
+
+// ---- FSB4 -----------------------------------------------------------------------------
+
+pub struct Fsb4Track {
+    pub name: Option<&'static str>,
+    /// FMOD Ex mode flags (codec, mono/stereo, 8-bit, signed...).
+    pub mode: u32,
+    pub rate: u32,
+    pub channels: u16,
+    pub samples: u32,
+    pub data_len: usize,
+}
+
+pub const FSB4_BASIC_HEADERS: u32 = 0x02;
+pub const FSB4_BIG_ENDIAN_PCM: u32 = 0x08;
+
+/// An FSB4 bank (version 4.0): full 0x50-byte track headers, or with the basic-headers flag
+/// a full first one and 8-byte ones (length in samples and bytes) after. Each track's data
+/// is padded to `align`; the last one only if `pad_last`.
+pub fn fsb4(flags: u32, tracks: &[Fsb4Track], align: usize, pad_last: bool, rng: &mut Rng) -> Vec<u8> {
+    let (mut headers, mut data) = (Vec::new(), Vec::new());
+    for (i, t) in tracks.iter().enumerate() {
+        if i > 0 && flags & FSB4_BASIC_HEADERS != 0 {
+            headers.extend_from_slice(&t.samples.to_le_bytes());
+            headers.extend_from_slice(&(t.data_len as u32).to_le_bytes());
+        } else {
+            let mut h = 0x50u16.to_le_bytes().to_vec();
+            let mut name = t.name.unwrap_or("").as_bytes().to_vec();
+            name.resize(30, 0);
+            h.extend(name);
+            for v in [t.samples, t.data_len as u32, 0, t.samples.saturating_sub(1), t.mode, t.rate] {
+                h.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [255u16, 128, 128, t.channels] {
+                h.extend_from_slice(&v.to_le_bytes()); // volume, pan, priority, channels
+            }
+            h.extend_from_slice(&1.0f32.to_le_bytes());
+            h.extend_from_slice(&10000.0f32.to_le_bytes());
+            h.extend_from_slice(&[0; 8]); // variations
+            assert_eq!(h.len(), 0x50);
+            headers.extend(h);
+        }
+        data.extend(rng.bytes(t.data_len));
+        if i + 1 < tracks.len() || pad_last {
+            data.resize(data.len().next_multiple_of(align), 0);
+        }
+    }
+    let mut out = b"FSB4".to_vec();
+    for v in [tracks.len() as u32, headers.len() as u32, data.len() as u32, 0x0004_0000, flags] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.resize(0x30, 0);
+    out.extend(headers);
     out.extend(data);
     out
 }
@@ -508,7 +569,7 @@ pub fn audio_archive() -> Fixture {
     let mut b = Builder::new("audio_archive", "WAV, WEM (RIFF and RIFX), FSB5 (also inside a .bank), Ogg Vorbis/Opus/FLAC, chained and multiplexed Ogg, and traps", 1);
 
     // Magic bytes in text: none of these is followed by a real header.
-    b.raw(b"notes: RIFF files, OggS pages and FSB5 banks live here, BKHD sections and AKPK packages too\n");
+    b.raw(b"notes: RIFF files, OggS pages and FSB5 banks live here, FSB4 ones, BKHD sections and AKPK packages too\n");
     b.gap();
 
     // Plain 16-bit stereo WAV with an odd-sized chunk after the data.
@@ -586,6 +647,47 @@ pub fn audio_archive() -> Fixture {
     let fsb = fsb5(0, 2, &[FsbTrack { name: None, channels: 1, rate: 22050, samples: 500, data_len: 1000 }], &mut b.rng);
     let mut m = Meta::new("fsb5", "fsb5", "PCM 16-bit", 1, 22050, Some(500));
     m.tracks = vec![ExpectedTrack::fsb("wav", None, 1, 22050, 500)];
+    b.audio(&fsb, m);
+    b.gap();
+
+    // FSB4 with full headers, 32-byte aligned (the last track too): 16-bit stereo PCM,
+    // signed 8-bit mono PCM of an odd length, and MPEG.
+    let tracks = [
+        Fsb4Track { name: Some("menu_theme"), mode: 0x10 | 0x40, rate: 44100, channels: 2, samples: 250, data_len: 1000 },
+        Fsb4Track { name: Some("blip"), mode: 0x08 | 0x100 | 0x20, rate: 22050, channels: 1, samples: 77, data_len: 77 },
+        Fsb4Track { name: Some("voice_01"), mode: 0x200 | 0x40, rate: 48000, channels: 2, samples: 4608, data_len: 417 },
+    ];
+    let fsb = fsb4(0, &tracks, 32, true, &mut b.rng);
+    let mut m = Meta::new("fsb4", "fsb4", "mixed", 2, 44100, None);
+    m.tracks = vec![
+        ExpectedTrack::fsb4("wav", "PCM 16-bit", Some("menu_theme"), 2, 44100, 250),
+        ExpectedTrack::fsb4("wav", "PCM 8-bit", Some("blip"), 1, 22050, 77),
+        ExpectedTrack::fsb4("fsb", "MPEG", Some("voice_01"), 2, 48000, 4608),
+    ];
+    b.audio(&fsb, m);
+    b.gap();
+
+    // FSB4 with basic headers (only the first names itself), 16-byte aligned, IMA ADPCM.
+    let tracks = [
+        Fsb4Track { name: Some("sfx_bank"), mode: 0x0040_0000 | 0x20, rate: 22050, channels: 1, samples: 1000, data_len: 512 },
+        Fsb4Track { name: None, mode: 0, rate: 0, channels: 0, samples: 640, data_len: 328 },
+        Fsb4Track { name: None, mode: 0, rate: 0, channels: 0, samples: 64, data_len: 36 },
+    ];
+    let fsb = fsb4(FSB4_BASIC_HEADERS, &tracks, 16, false, &mut b.rng);
+    let mut m = Meta::new("fsb4", "fsb4", "IMA ADPCM", 1, 22050, None);
+    m.tracks = vec![
+        ExpectedTrack::fsb4("fsb", "IMA ADPCM", Some("sfx_bank"), 1, 22050, 1000),
+        ExpectedTrack::fsb4("fsb", "IMA ADPCM", None, 1, 22050, 640),
+        ExpectedTrack::fsb4("fsb", "IMA ADPCM", None, 1, 22050, 64),
+    ];
+    b.audio(&fsb, m);
+    b.gap();
+
+    // FSB4 with big-endian 16-bit PCM (a console bank).
+    let tracks = [Fsb4Track { name: Some("be_pcm"), mode: 0x10 | 0x20, rate: 16000, channels: 1, samples: 100, data_len: 200 }];
+    let fsb = fsb4(FSB4_BIG_ENDIAN_PCM, &tracks, 32, false, &mut b.rng);
+    let mut m = Meta::new("fsb4", "fsb4", "PCM 16-bit", 1, 16000, Some(100));
+    m.tracks = vec![ExpectedTrack::fsb4("wav", "PCM 16-bit", Some("be_pcm"), 1, 16000, 100)];
     b.audio(&fsb, m);
     b.gap();
 
@@ -743,6 +845,22 @@ pub fn audio_archive() -> Fixture {
     b.gap();
     let bad = fsb5(1, 99, &[FsbTrack { name: None, channels: 1, rate: 8000, samples: 10, data_len: 32 }], &mut b.rng);
     b.reject(&bad, "unknown codec 99");
+    b.gap();
+    // An FSB4 whose track header is bigger than the header area.
+    let mut bad = b"FSB4".to_vec();
+    for v in [1u32, 8, 0, 0x0004_0000, 0] {
+        bad.extend_from_slice(&v.to_le_bytes());
+    }
+    bad.resize(0x30, 0);
+    bad.extend_from_slice(&[0x50, 0, 0, 0, 0, 0, 0, 0]);
+    b.reject(&bad, "track 0's header is cut off");
+    b.gap();
+    // An FSB4 whose tracks need more data than the header says there is.
+    let tracks = [Fsb4Track { name: Some("x"), mode: 0x10, rate: 8000, channels: 1, samples: 50, data_len: 100 }];
+    let mut bad = fsb4(0, &tracks, 32, false, &mut b.rng);
+    bad[12..16].copy_from_slice(&60u32.to_le_bytes());
+    bad.truncate(0x30 + 0x50 + 60);
+    b.reject(&bad, "the tracks need 100 bytes of data");
     b.gap();
     // A bank whose index says its medium is bigger than DATA: the first DIDX entry's size
     // is at 16 (BKHD) + 8 (its section header) + 8 (DIDX's) + 8 (ID, offset).

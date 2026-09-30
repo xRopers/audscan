@@ -17,7 +17,7 @@ use std::ops::Range;
 use memchr::memchr;
 
 use crate::format::{AudioFormat, AudioInfo, Container, Reject, Track, u32_le, u64_le};
-use crate::formats::riff::Riff;
+use crate::formats::riff::{Pcm, Riff, pcm_wav};
 
 pub struct Fsb5;
 
@@ -202,7 +202,8 @@ pub fn split_track(bank: &[u8], index: usize) -> Result<Vec<u8>, String> {
     let track = info.tracks.get(index).ok_or_else(|| format!("the bank has no track {index}"))?;
     let data = &bank[track.offset as usize..(track.offset + track.size) as usize];
     let (file, back, samples) = if PCM.contains(&layout.mode) {
-        let (file, frames) = pcm_wav(layout.mode, track, data);
+        let pcm = Pcm { bytes: (layout.mode as u16).min(4), float: layout.mode == 5, signed_8bit: true, big_endian: false };
+        let (file, frames) = pcm_wav(pcm, track.channels, track.sample_rate, track.samples.unwrap_or(0), data);
         let back = Riff.parse(&file);
         (file, back, Some(frames))
     } else {
@@ -219,45 +220,6 @@ pub fn split_track(bank: &[u8], index: usize) -> Result<Vec<u8>, String> {
         return Err(format!("track {index} reads back differently once split"));
     }
     Ok(file)
-}
-
-/// A WAV of a PCM track, and how many frames it holds: as many as the track says, or as
-/// fit in its data. FMOD's 8-bit PCM is signed and WAV's unsigned; the rest is copied.
-fn pcm_wav(mode: u32, track: &Track, data: &[u8]) -> (Vec<u8>, u64) {
-    let bytes_per_sample: u16 = match mode {
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        _ => 4,
-    };
-    let frame = usize::from(bytes_per_sample * track.channels.max(1));
-    let frames = (track.samples.unwrap_or(0) as usize).min(data.len() / frame);
-    let mut pcm = data[..frames * frame].to_vec();
-    if mode == 1 {
-        pcm.iter_mut().for_each(|b| *b ^= 0x80);
-    }
-    let tag: u16 = if mode == 5 { 3 } else { 1 };
-    let mut fmt = Vec::with_capacity(16);
-    fmt.extend_from_slice(&tag.to_le_bytes());
-    fmt.extend_from_slice(&track.channels.to_le_bytes());
-    fmt.extend_from_slice(&track.sample_rate.to_le_bytes());
-    fmt.extend_from_slice(&(track.sample_rate * frame as u32).to_le_bytes());
-    fmt.extend_from_slice(&(frame as u16).to_le_bytes());
-    fmt.extend_from_slice(&(bytes_per_sample * 8).to_le_bytes());
-
-    let mut out = b"RIFF".to_vec();
-    let body = 4 + 8 + fmt.len() + 8 + pcm.len() + pcm.len() % 2;
-    out.extend_from_slice(&(body as u32).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
-    out.extend(fmt);
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
-    out.extend_from_slice(&pcm);
-    if pcm.len() % 2 == 1 {
-        out.push(0);
-    }
-    (out, frames as u64)
 }
 
 fn one_track_bank(bank: &[u8], layout: &Layout, index: usize, track: &Track, data: &[u8]) -> Vec<u8> {

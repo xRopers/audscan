@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "audscan", version, about = "Find and extract audio (WAV, Wwise WEM/BNK/PCK, FMOD FSB5, Ogg) inside binary files")]
+#[command(name = "audscan", version, about = "Find and extract audio (WAV, Wwise WEM/BNK/PCK, FMOD FSB4/FSB5, Ogg) inside binary files")]
 struct Cli {
     /// Print machine-readable JSON on stdout instead of text
     #[arg(long, global = true)]
@@ -28,7 +28,7 @@ enum Command {
         /// Also list headers that look like audio but can't be used, and why
         #[arg(long)]
         show_rejected: bool,
-        /// List every track of an FSB5 bank, and every file in a Wwise bank or package
+        /// List every track of an FMOD bank, and every file in a Wwise bank or package
         #[arg(long)]
         tracks: bool,
         #[command(flatten)]
@@ -49,7 +49,7 @@ enum Command {
         force: bool,
         /// Also split banks and packages into a folder named after each: Wwise WEMs (and a
         /// package's SoundBanks) as <ID>.wem / <ID>.bnk, localized ones in a subfolder
-        /// per language; FSB5 tracks as <name>.wav (PCM) or one-track <name>.fsb
+        /// per language; FSB4/FSB5 tracks as <name>.wav (PCM) or one-track <name>.fsb
         #[arg(long)]
         split: bool,
         /// Filters for the fresh scan (ignored with --manifest)
@@ -60,14 +60,30 @@ enum Command {
 
 #[derive(Args)]
 struct ScanArgs {
-    /// Formats to look for, comma separated [default: all: riff, fsb5, ogg, bnk, pck]
-    #[arg(long, value_delimiter = ',', default_values_t = Container::ALL.to_vec(), hide_default_value = true)]
-    formats: Vec<Container>,
+    /// Formats to look for, comma separated: riff, fsb4, fsb5, ogg, bnk, pck, or the groups
+    /// fmod (fsb4, fsb5) and wwise (riff, bnk, pck) [default: all]
+    #[arg(long, value_delimiter = ',')]
+    formats: Vec<FormatGroup>,
+}
+
+/// One `--formats` entry: a format or a group of them.
+#[derive(Clone)]
+struct FormatGroup(Vec<Container>);
+
+impl std::str::FromStr for FormatGroup {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Container::parse_group(s).map(FormatGroup)
+    }
 }
 
 impl ScanArgs {
     fn options(&self) -> ScanOptions {
-        let mut formats = self.formats.clone();
+        let mut formats: Vec<Container> = self.formats.iter().flat_map(|g| g.0.iter().copied()).collect();
+        if formats.is_empty() {
+            formats = Container::ALL.to_vec();
+        }
         formats.sort_unstable();
         formats.dedup();
         ScanOptions { formats }

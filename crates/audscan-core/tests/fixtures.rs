@@ -172,7 +172,7 @@ fn split_writes_each_wwise_file_by_id_and_language() {
     assert_eq!((alone.len(), alone[0].container, alone[0].info.size), (1, Container::Bnk, bank.len() as u64));
 
     // Prefetch media come out as they are in the bank: the start of the WEM.
-    let i = f.expected.iter().position(|e| e.codec == "mixed").unwrap();
+    let i = f.expected.iter().position(|e| e.container == "bnk" && e.codec == "mixed").unwrap();
     assert_eq!(files[i].split.len(), 3);
     assert_eq!(fs::read(&files[i].split[2]).unwrap().len(), 600);
     // Without split, nothing is.
@@ -180,14 +180,18 @@ fn split_writes_each_wwise_file_by_id_and_language() {
     assert!(plain.iter().all(|f| f.split.is_empty()));
 }
 
-/// The split files of the fixture's `n`th FSB5 bank, by name relative to its folder.
 fn split_fsb5(n: usize) -> (audscan_fixtures::Expected, Vec<(String, Vec<u8>)>) {
+    split_bank("fsb5", n)
+}
+
+/// The split files of the fixture's `n`th bank of a format, by name relative to its folder.
+fn split_bank(container: &str, n: usize) -> (audscan_fixtures::Expected, Vec<(String, Vec<u8>)>) {
     let f = audscan_fixtures::audio_archive();
     let found = scan(&f.data, &ScanOptions::default()).audio;
     let manifest = Manifest::new(SourceInfo::describe(Path::new(f.name), &f.data), ScanOptions::default(), &found);
     let dir = tempfile::tempdir().unwrap();
     let files = extract_all(&f.data, &manifest, dir.path(), &ExtractOptions { split: true, ..Default::default() }).unwrap();
-    let i = f.expected.iter().enumerate().filter(|(_, e)| e.container == "fsb5").nth(n).unwrap().0;
+    let i = f.expected.iter().enumerate().filter(|(_, e)| e.container == container).nth(n).unwrap().0;
     let folder = dir.path().join(format!("{:08x}", f.expected[i].offset));
     let split = files[i]
         .split
@@ -246,6 +250,74 @@ fn pcm_fsb5_tracks_split_into_wavs() {
         let data_at = wav.len() - frames - frames % 2;
         assert_eq!(&wav[data_at..data_at + frames], &unsigned[..]);
     }
+}
+
+/// The fixture's `n`th FSB4 bank as found, with its bytes.
+fn found_fsb4(n: usize) -> (audscan_core::FoundAudio, Vec<u8>) {
+    let f = audscan_fixtures::audio_archive();
+    let bank = scan(&f.data, &ScanOptions::default()).audio.into_iter().filter(|a| a.container == Container::Fsb4).nth(n).unwrap();
+    let bytes = f.data[bank.offset as usize..bank.end() as usize].to_vec();
+    (bank, bytes)
+}
+
+#[test]
+fn fsb4_data_alignment_is_worked_out() {
+    // 32-byte aligned: 1000 bytes take 1024, 77 take 96.
+    let (bank, _) = found_fsb4(0);
+    let t = &bank.info.tracks;
+    let first = t[0].offset;
+    assert_eq!((t[1].offset - first, t[2].offset - first), (1024, 1024 + 96));
+    assert_eq!(t.iter().map(|t| t.size).collect::<Vec<_>>(), [1000, 77, 417]);
+    // 16-byte aligned, the last track unpadded.
+    let (bank, _) = found_fsb4(1);
+    let t = &bank.info.tracks;
+    assert_eq!((t[1].offset - t[0].offset, t[2].offset - t[0].offset), (512, 512 + 336));
+    assert_eq!(t[2].offset + t[2].size, bank.info.size);
+}
+
+#[test]
+fn fsb4_tracks_split_into_wavs_and_one_track_banks() {
+    let (_, split) = split_bank("fsb4", 0);
+    let names: Vec<_> = split.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["menu_theme.wav", "blip.wav", "voice_01.fsb"]);
+    let (bank, bytes) = found_fsb4(0);
+    let data = |i: usize| {
+        let t = &bank.info.tracks[i];
+        &bytes[t.offset as usize..(t.offset + t.size) as usize]
+    };
+    // 16-bit little-endian PCM is copied; signed 8-bit is made unsigned (and padded to even).
+    assert!(split[0].1.ends_with(data(0)));
+    let unsigned: Vec<u8> = data(1).iter().map(|b| b ^ 0x80).chain([0]).collect();
+    assert!(split[1].1.ends_with(&unsigned));
+    for (i, codec) in [(0, "PCM 16-bit"), (1, "PCM 8-bit")] {
+        let a = &scan(&split[i].1, &ScanOptions::default()).audio[0];
+        let t = &bank.info.tracks[i];
+        assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.sample_rate, a.info.samples), (codec, t.channels, t.sample_rate, t.samples));
+    }
+    // MPEG stays in a bank of one, its data as it was.
+    let a = &scan(&split[2].1, &ScanOptions::default()).audio[0];
+    assert_eq!((a.container, a.info.codec.as_str(), a.info.tracks[0].name.as_deref(), a.info.samples), (Container::Fsb4, "MPEG", Some("voice_01"), Some(4608)));
+    assert!(split[2].1.ends_with(data(2)));
+
+    // Basic headers: each split bank gets a full header of its own.
+    let (_, split) = split_bank("fsb4", 1);
+    let names: Vec<_> = split.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["sfx_bank.fsb", "track1.fsb", "track2.fsb"]);
+    let (bank, bytes) = found_fsb4(1);
+    for ((_, file), t) in split.iter().zip(&bank.info.tracks) {
+        let a = &scan(file, &ScanOptions::default()).audio[0];
+        assert_eq!((a.info.codec.as_str(), a.info.channels, a.info.sample_rate, a.info.samples), ("IMA ADPCM", 1, 22050, t.samples));
+        assert_eq!(u32::from_le_bytes(file[0x14..0x18].try_into().unwrap()) & 2, 0, "not basic headers any more");
+        assert!(file.ends_with(&bytes[t.offset as usize..(t.offset + t.size) as usize]));
+    }
+
+    // Big-endian PCM comes out little-endian.
+    let (_, split) = split_bank("fsb4", 2);
+    let (bank, bytes) = found_fsb4(2);
+    let t = &bank.info.tracks[0];
+    let swapped: Vec<u8> = bytes[t.offset as usize..(t.offset + t.size) as usize].chunks(2).flat_map(|p| [p[1], p[0]]).collect();
+    assert_eq!(split[0].0, "be_pcm.wav");
+    assert!(split[0].1.ends_with(&swapped));
 }
 
 #[test]
